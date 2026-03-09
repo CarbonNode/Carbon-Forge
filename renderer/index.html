@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Carbon Isolate</title>
+    <link rel="stylesheet" href="style.css" />
+    <style>.hidden { display: none !important; }</style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <img id="app-icon" src="../Carbon Isolate Icon.png" alt="" />
+        <h1>Carbon <span class="accent">Isolate</span></h1>
+        <p id="status">Starting AI engine...</p>
+        <button id="settings-toggle" title="Settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+        </button>
+      </header>
+
+      <!-- Settings Panel -->
+      <div id="settings">
+        <button id="settings-close" title="Close">&times;</button>
+        <div class="setting-group">
+          <label>Model</label>
+          <select id="model-select">
+            <option value="u2net">U2-Net (General)</option>
+            <option value="u2netp">U2-Net Lite (Fast)</option>
+            <option value="u2net_human_seg">U2-Net Human</option>
+            <option value="isnet-general-use" selected>IS-Net (General)</option>
+            <option value="silueta">Silueta</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label>
+            <input type="checkbox" id="alpha-matting" />
+            Alpha Matting
+            <span class="setting-hint">Refines edges, catches inner areas</span>
+          </label>
+        </div>
+        <div class="setting-divider"></div>
+        <div class="setting-group">
+          <label>
+            <input type="checkbox" id="color-remove" />
+            Remove Inner Color
+            <span class="setting-hint">Strips remaining color after AI removal</span>
+          </label>
+        </div>
+        <div id="color-options" class="hidden">
+          <div class="setting-group">
+            <label>Target Color</label>
+            <div class="color-row">
+              <input type="color" id="color-picker" value="#ffffff" />
+              <span id="color-hex">#ffffff</span>
+            </div>
+          </div>
+          <div class="setting-group">
+            <label>Tolerance <span id="tol-val">20</span>%</label>
+            <input type="range" id="color-tolerance" min="1" max="100" value="20" />
+            <span class="setting-hint">Higher = removes wider range of shades</span>
+          </div>
+        </div>
+        <div class="setting-divider"></div>
+        <div id="matting-options" class="hidden">
+          <div class="setting-group">
+            <label>Foreground Threshold <span id="fg-val">240</span></label>
+            <input type="range" id="fg-threshold" min="0" max="255" value="240" />
+            <span class="setting-hint">Higher = stricter foreground detection</span>
+          </div>
+          <div class="setting-group">
+            <label>Background Threshold <span id="bg-val">10</span></label>
+            <input type="range" id="bg-threshold" min="0" max="255" value="10" />
+            <span class="setting-hint">Lower = more aggressive background removal</span>
+          </div>
+          <div class="setting-group">
+            <label>Erode Size <span id="erode-val">10</span></label>
+            <input type="range" id="erode-size" min="1" max="40" value="10" />
+            <span class="setting-hint">Edge erosion amount</span>
+          </div>
+        </div>
+        <div class="setting-divider"></div>
+        <div class="setting-group">
+          <label>
+            <input type="checkbox" id="edge-smooth" />
+            Smooth Edges
+            <span class="setting-hint">Fixes jagged edges and color fringing</span>
+          </label>
+        </div>
+        <div id="edge-options" class="hidden">
+          <div class="setting-group">
+            <label>Trim Edges <span id="edge-trim-val">1</span>px</label>
+            <input type="range" id="edge-trim" min="0" max="10" value="1" />
+            <span class="setting-hint">Erodes edge pixels to remove fringe/halo</span>
+          </div>
+          <div class="setting-group">
+            <label>Smoothing <span id="edge-strength-val">50</span>%</label>
+            <input type="range" id="edge-strength" min="1" max="100" value="50" />
+            <span class="setting-hint">Anti-aliases edges and defringes colors</span>
+          </div>
+        </div>
+      </div>
+
+      <div id="drop-zone">
+        <div id="drop-content">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="17 8 12 3 7 8" />
+            <line x1="12" y1="3" x2="12" y2="15" />
+          </svg>
+          <p>Drop an image here</p>
+          <span class="hint">or click to browse</span>
+          <div id="mode-toggle">
+            <button id="mode-remove" class="mode-btn active">Remove Background</button>
+            <button id="mode-edit" class="mode-btn">Edit Only</button>
+          </div>
+        </div>
+        <input type="file" id="file-input" accept="image/*" />
+      </div>
+
+      <div id="preview" class="hidden">
+        <div id="reveal-container">
+          <div id="checkerboard"></div>
+          <img id="before-img" />
+          <img id="after-img" />
+          <div id="wipe-line"></div>
+          <canvas id="eraser-canvas"></canvas>
+          <canvas id="particles"></canvas>
+          <div id="spinner">
+            <div class="spin"></div>
+            <p>Removing background...</p>
+          </div>
+        </div>
+      </div>
+
+      <div id="picked-colors" class="hidden">
+        <button id="picked-colors-toggle">
+          <span id="picked-colors-count">0</span> colors picked
+          <svg class="chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div id="picked-colors-list" class="collapsed"></div>
+      </div>
+      <div id="actions" class="hidden">
+        <button id="download-btn">Download PNG</button>
+        <button id="eyedropper-btn" title="Click on image to pick a color to remove">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M2 22l1-1h3l9-9"/>
+            <path d="M3 21v-3l9-9"/>
+            <path d="M14.5 5.5l4-4a1.41 1.41 0 0 1 2 2l-4 4"/>
+            <path d="M12 8l4 4"/>
+          </svg>
+          Pick Color
+        </button>
+        <button id="eraser-btn" title="Erase areas manually ([ ] to resize)">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20 20H7L3 16c-.8-.8-.8-2 0-2.8L14.6 1.6c.8-.8 2-.8 2.8 0l5 5c.8.8.8 2 0 2.8L11 20"/>
+            <path d="M6 12l5 5"/>
+          </svg>
+          Eraser
+        </button>
+        <button id="trim-btn" title="Remove transparent space around image">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M6 2v4"/><path d="M18 2v4"/><path d="M6 18v4"/><path d="M18 18v4"/>
+            <path d="M2 6h4"/><path d="M18 6h4"/><path d="M2 18h4"/><path d="M18 18h4"/>
+            <rect x="6" y="6" width="12" height="12" rx="1"/>
+          </svg>
+          Trim
+        </button>
+        <button id="resize-btn" title="Resize image">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/>
+            <line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>
+          </svg>
+          Resize
+        </button>
+        <button id="reprocess-btn" class="hidden">Reprocess</button>
+        <button id="reset-btn">New Image</button>
+      </div>
+      <div id="resize-panel" class="hidden">
+        <div class="resize-row">
+          <label>W<input type="number" id="resize-w" min="1" /></label>
+          <button id="resize-lock" class="active" title="Lock aspect ratio">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+            </svg>
+          </button>
+          <label>H<input type="number" id="resize-h" min="1" /></label>
+          <button id="resize-apply">Apply</button>
+          <span id="resize-info"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="color-preview-tooltip"><div class="swatch"></div><span></span></div>
+    <div id="brush-cursor"></div>
+    <script src="renderer.js"></script>
+  </body>
+</html>

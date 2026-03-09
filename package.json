@@ -1,0 +1,49 @@
+{
+  "name": "carbon-isolate",
+  "version": "1.0.0",
+  "description": "AI-powered background removal",
+  "author": "Carbon Isolate",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build-backend": "pyinstaller --onedir --name carbon-isolate-backend --hidden-import=rembg --hidden-import=flask --hidden-import=scipy --hidden-import=scipy.ndimage --hidden-import=PIL --hidden-import=numpy --collect-data rembg --noconfirm backend/server.py",
+    "build": "electron-builder --win"
+  },
+  "build": {
+    "appId": "com.carbonisolate.app",
+    "productName": "Carbon Isolate",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "icon.ico",
+      "executableName": "Carbon Isolate"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico",
+      "installerHeaderIcon": "icon.ico"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "icon.ico",
+      "Carbon Isolate Icon.png",
+      "renderer/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/carbon-isolate-backend",
+        "to": "backend",
+        "filter": ["**/*"]
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.8.1"
+  }
+}
