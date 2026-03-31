@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -11,13 +11,11 @@ const PORT = 5123;
 function startBackend() {
   let cmd, args, opts;
   if (app.isPackaged) {
-    // Use bundled PyInstaller exe
     const backendExe = path.join(process.resourcesPath, "backend", "carbon-isolate-backend.exe");
     cmd = backendExe;
     args = [String(PORT)];
     opts = { stdio: ["ignore", "pipe", "pipe"] };
   } else {
-    // Dev mode: run Python directly
     const serverPath = path.join(__dirname, "backend", "server.py");
     const pythonCmd = process.platform === "win32" ? "python3.exe" : "python3";
     cmd = pythonCmd;
@@ -101,6 +99,17 @@ ipcMain.handle("remove-bg", async (_event, buffer, settings = {}) => {
   if (settings.edgeTrim != null)
     headers["X-Edge-Trim"] = String(settings.edgeTrim);
 
+  // Watermark removal
+  if (settings.watermarkRemove) headers["X-Watermark-Remove"] = "true";
+  if (settings.watermarkPosition)
+    headers["X-Watermark-Position"] = settings.watermarkPosition;
+  if (settings.watermarkSize != null)
+    headers["X-Watermark-Size"] = String(settings.watermarkSize);
+
+  // Pipeline control
+  if (settings.skipBg) headers["X-Skip-Bg"] = "true";
+  if (settings.autoTrim) headers["X-Auto-Trim"] = "true";
+
   return new Promise((resolve, reject) => {
     const req = http.request(
       {
@@ -109,6 +118,7 @@ ipcMain.handle("remove-bg", async (_event, buffer, settings = {}) => {
         path: "/remove-bg",
         method: "POST",
         headers,
+        timeout: 300000, // 5 min for large images / model download
       },
       (res) => {
         const chunks = [];
@@ -117,6 +127,80 @@ ipcMain.handle("remove-bg", async (_event, buffer, settings = {}) => {
       }
     );
     req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Request timed out"));
+    });
+    req.write(Buffer.from(buffer));
+    req.end();
+  });
+});
+
+ipcMain.handle("split-sprites", async (_event, buffer, settings = {}) => {
+  const headers = {
+    "Content-Type": "application/octet-stream",
+  };
+  if (settings.model) headers["X-Model"] = settings.model;
+  if (settings.alphaMatting) headers["X-Alpha-Matting"] = "true";
+  if (settings.fgThreshold != null)
+    headers["X-FG-Threshold"] = String(settings.fgThreshold);
+  if (settings.bgThreshold != null)
+    headers["X-BG-Threshold"] = String(settings.bgThreshold);
+  if (settings.erodeSize != null)
+    headers["X-Erode-Size"] = String(settings.erodeSize);
+  if (settings.colorRemove) headers["X-Color-Remove"] = "true";
+  if (settings.colors) headers["X-Colors"] = JSON.stringify(settings.colors);
+  if (settings.colorTolerance != null)
+    headers["X-Color-Tolerance"] = String(settings.colorTolerance);
+  if (settings.edgeSmooth) headers["X-Edge-Smooth"] = "true";
+  if (settings.edgeStrength != null)
+    headers["X-Edge-Strength"] = String(settings.edgeStrength);
+  if (settings.edgeTrim != null)
+    headers["X-Edge-Trim"] = String(settings.edgeTrim);
+  if (settings.watermarkRemove) headers["X-Watermark-Remove"] = "true";
+  if (settings.watermarkPosition)
+    headers["X-Watermark-Position"] = settings.watermarkPosition;
+  if (settings.watermarkSize != null)
+    headers["X-Watermark-Size"] = String(settings.watermarkSize);
+
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port: PORT,
+        path: "/split-sprites",
+        method: "POST",
+        headers,
+        timeout: 300000,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString();
+          if (res.statusCode !== 200) {
+            try {
+              const err = JSON.parse(body);
+              reject(new Error(err.error || `Backend error ${res.statusCode}`));
+            } catch {
+              reject(new Error(`Backend error ${res.statusCode}: ${body.slice(0, 200)}`));
+            }
+            return;
+          }
+          try {
+            const json = JSON.parse(body);
+            resolve(json);
+          } catch (e) {
+            reject(new Error("Invalid response from split-sprites"));
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Request timed out"));
+    });
     req.write(Buffer.from(buffer));
     req.end();
   });
@@ -132,6 +216,43 @@ ipcMain.handle("save-file", async (_event, buffer, defaultName) => {
   return true;
 });
 
+// Batch processing support
+ipcMain.handle("select-directory", async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openDirectory", "createDirectory"],
+    title: "Select output folder for processed images",
+  });
+  if (canceled || !filePaths.length) return null;
+  return filePaths[0];
+});
+
+ipcMain.handle("save-to-path", async (_event, buffer, filePath) => {
+  try {
+    fs.writeFileSync(filePath, Buffer.from(buffer));
+    return true;
+  } catch (err) {
+    console.error("save-to-path error:", err);
+    return false;
+  }
+});
+
+ipcMain.handle("open-path", async (_event, dirPath) => {
+  shell.openPath(dirPath);
+});
+
+// Single instance lock — quit if another instance is already running
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 app.whenReady().then(async () => {
   startBackend();
   createWindow();
@@ -145,7 +266,6 @@ app.whenReady().then(async () => {
 
 app.on("will-quit", () => {
   if (pythonProcess) {
-    // shell: true spawns via cmd.exe, so kill the process tree
     if (process.platform === "win32") {
       spawn("taskkill", ["/pid", String(pythonProcess.pid), "/f", "/t"]);
     } else {

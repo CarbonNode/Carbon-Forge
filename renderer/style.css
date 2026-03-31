@@ -771,6 +771,300 @@ button {
   transition: transform 0.1s ease;
 }
 
+/* Batch Processing */
+#batch-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+#batch-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+#batch-header svg {
+  color: #e94560;
+}
+
+#batch-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #e0e0e0;
+}
+
+#batch-counter {
+  margin-left: auto;
+  font-size: 13px;
+  color: #888;
+  font-family: monospace;
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: rgba(102, 102, 102, 0.1);
+  border: 1px solid #2a2a2a;
+}
+
+#batch-progress {
+  height: 4px;
+  background: #1e1e1e;
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+#batch-progress-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #e94560, #ff6b8a);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+#batch-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-right: 4px;
+}
+
+#batch-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+#batch-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#batch-list::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 2px;
+}
+
+.batch-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #141414;
+  border: 1px solid #1e1e1e;
+  border-radius: 8px;
+  font-size: 13px;
+  transition: border-color 0.2s;
+}
+
+.batch-item:has(.processing) {
+  border-color: #e94560;
+  background: rgba(233, 69, 96, 0.04);
+}
+
+.batch-item:has(.done) {
+  border-color: rgba(78, 204, 163, 0.25);
+}
+
+.batch-item:has(.error) {
+  border-color: rgba(233, 69, 96, 0.25);
+}
+
+.batch-icon {
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.batch-icon.pending { color: #555; }
+.batch-icon.processing { color: #e94560; animation: spin 0.8s linear infinite; display: inline-block; }
+.batch-icon.done { color: #4ecca3; }
+.batch-icon.error { color: #e94560; }
+
+.batch-name {
+  flex: 1;
+  color: #ccc;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-status {
+  font-size: 11px;
+  color: #666;
+  flex-shrink: 0;
+}
+
+#batch-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 4px 0;
+}
+
+#batch-cancel-btn {
+  background: #1e1e1e;
+  color: #aaa;
+  border: 1px solid #2a2a2a;
+}
+
+#batch-cancel-btn:hover {
+  background: #252525;
+  color: #e94560;
+  border-color: #e94560;
+}
+
+#batch-open-btn {
+  background: #e94560;
+  color: white;
+}
+
+#batch-open-btn:hover {
+  background: #d63851;
+}
+
+#batch-done-btn {
+  background: #1e1e1e;
+  color: #aaa;
+  border: 1px solid #2a2a2a;
+}
+
+#batch-done-btn:hover {
+  background: #252525;
+  color: #ddd;
+}
+
+/* Sprite Split Panel */
+#sprite-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+#sprite-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+#sprite-header svg {
+  color: #e94560;
+}
+
+#sprite-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #e0e0e0;
+}
+
+#sprite-count {
+  margin-left: auto;
+  font-size: 13px;
+  color: #888;
+  font-family: monospace;
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: rgba(102, 102, 102, 0.1);
+  border: 1px solid #2a2a2a;
+}
+
+#sprite-grid {
+  flex: 1;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  padding: 4px;
+}
+
+#sprite-grid::-webkit-scrollbar {
+  width: 4px;
+}
+
+#sprite-grid::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 2px;
+}
+
+.sprite-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px;
+  background: #141414;
+  border: 1px solid #1e1e1e;
+  border-radius: 8px;
+  transition: border-color 0.2s;
+}
+
+.sprite-card:hover {
+  border-color: #e94560;
+}
+
+.sprite-card img {
+  max-width: 100%;
+  max-height: 120px;
+  object-fit: contain;
+  border-radius: 4px;
+  background-image:
+    linear-gradient(45deg, #1e1e1e 25%, transparent 25%),
+    linear-gradient(-45deg, #1e1e1e 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #1e1e1e 75%),
+    linear-gradient(-45deg, transparent 75%, #1e1e1e 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+  background-color: #151515;
+}
+
+.sprite-card span {
+  font-size: 10px;
+  color: #666;
+  text-align: center;
+  word-break: break-all;
+}
+
+#sprite-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 4px 0;
+}
+
+#sprite-save-btn {
+  background: #e94560;
+  color: white;
+}
+
+#sprite-save-btn:hover {
+  background: #d63851;
+}
+
+#sprite-reset-btn {
+  background: #1e1e1e;
+  color: #aaa;
+  border: 1px solid #2a2a2a;
+}
+
+#sprite-reset-btn:hover {
+  background: #252525;
+  color: #ddd;
+}
+
+/* Watermark options */
+#watermark-options {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .hidden {
   display: none !important;
 }

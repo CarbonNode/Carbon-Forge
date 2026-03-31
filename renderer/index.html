@@ -34,6 +34,49 @@
             <option value="silueta">Silueta</option>
           </select>
         </div>
+
+        <div class="setting-divider"></div>
+
+        <!-- Watermark Removal -->
+        <div class="setting-group">
+          <label>
+            <input type="checkbox" id="watermark-remove" checked />
+            Remove Watermark
+            <span class="setting-hint">AI inpainting removes watermarks before processing</span>
+          </label>
+        </div>
+        <div id="watermark-options">
+          <div class="setting-group">
+            <label>Watermark Position</label>
+            <select id="watermark-position">
+              <option value="bottom-right" selected>Bottom Right</option>
+              <option value="bottom-left">Bottom Left</option>
+              <option value="top-right">Top Right</option>
+              <option value="top-left">Top Left</option>
+              <option value="bottom-center">Bottom Center (strip)</option>
+              <option value="top-center">Top Center (strip)</option>
+            </select>
+          </div>
+          <div class="setting-group">
+            <label>Region Size <span id="wm-size-val">15</span>%</label>
+            <input type="range" id="watermark-size" min="5" max="40" value="15" />
+            <span class="setting-hint">Area covered by the watermark</span>
+          </div>
+        </div>
+
+        <div class="setting-divider"></div>
+
+        <!-- Auto Trim -->
+        <div class="setting-group">
+          <label>
+            <input type="checkbox" id="auto-trim" checked />
+            Auto Trim
+            <span class="setting-hint">Remove transparent padding automatically</span>
+          </label>
+        </div>
+
+        <div class="setting-divider"></div>
+
         <div class="setting-group">
           <label>
             <input type="checkbox" id="alpha-matting" />
@@ -41,6 +84,24 @@
             <span class="setting-hint">Refines edges, catches inner areas</span>
           </label>
         </div>
+        <div id="matting-options" class="hidden">
+          <div class="setting-group">
+            <label>Foreground Threshold <span id="fg-val">240</span></label>
+            <input type="range" id="fg-threshold" min="0" max="255" value="240" />
+            <span class="setting-hint">Higher = stricter foreground detection</span>
+          </div>
+          <div class="setting-group">
+            <label>Background Threshold <span id="bg-val">10</span></label>
+            <input type="range" id="bg-threshold" min="0" max="255" value="10" />
+            <span class="setting-hint">Lower = more aggressive background removal</span>
+          </div>
+          <div class="setting-group">
+            <label>Erode Size <span id="erode-val">10</span></label>
+            <input type="range" id="erode-size" min="1" max="40" value="10" />
+            <span class="setting-hint">Edge erosion amount</span>
+          </div>
+        </div>
+
         <div class="setting-divider"></div>
         <div class="setting-group">
           <label>
@@ -64,32 +125,14 @@
           </div>
         </div>
         <div class="setting-divider"></div>
-        <div id="matting-options" class="hidden">
-          <div class="setting-group">
-            <label>Foreground Threshold <span id="fg-val">240</span></label>
-            <input type="range" id="fg-threshold" min="0" max="255" value="240" />
-            <span class="setting-hint">Higher = stricter foreground detection</span>
-          </div>
-          <div class="setting-group">
-            <label>Background Threshold <span id="bg-val">10</span></label>
-            <input type="range" id="bg-threshold" min="0" max="255" value="10" />
-            <span class="setting-hint">Lower = more aggressive background removal</span>
-          </div>
-          <div class="setting-group">
-            <label>Erode Size <span id="erode-val">10</span></label>
-            <input type="range" id="erode-size" min="1" max="40" value="10" />
-            <span class="setting-hint">Edge erosion amount</span>
-          </div>
-        </div>
-        <div class="setting-divider"></div>
         <div class="setting-group">
           <label>
-            <input type="checkbox" id="edge-smooth" />
+            <input type="checkbox" id="edge-smooth" checked />
             Smooth Edges
             <span class="setting-hint">Fixes jagged edges and color fringing</span>
           </label>
         </div>
-        <div id="edge-options" class="hidden">
+        <div id="edge-options">
           <div class="setting-group">
             <label>Trim Edges <span id="edge-trim-val">1</span>px</label>
             <input type="range" id="edge-trim" min="0" max="10" value="1" />
@@ -110,14 +153,15 @@
             <polyline points="17 8 12 3 7 8" />
             <line x1="12" y1="3" x2="12" y2="15" />
           </svg>
-          <p>Drop an image here</p>
-          <span class="hint">or click to browse</span>
+          <p>Drop image(s) here</p>
+          <span class="hint">or click to browse &mdash; multiple files for batch mode</span>
           <div id="mode-toggle">
             <button id="mode-remove" class="mode-btn active">Remove Background</button>
+            <button id="mode-split" class="mode-btn">Split Sprites</button>
             <button id="mode-edit" class="mode-btn">Edit Only</button>
           </div>
         </div>
-        <input type="file" id="file-input" accept="image/*" />
+        <input type="file" id="file-input" accept="image/*" multiple />
       </div>
 
       <div id="preview" class="hidden">
@@ -130,8 +174,46 @@
           <canvas id="particles"></canvas>
           <div id="spinner">
             <div class="spin"></div>
-            <p>Removing background...</p>
+            <p id="spinner-text">Processing...</p>
           </div>
+        </div>
+      </div>
+
+      <!-- Batch Processing Panel -->
+      <div id="batch-panel" class="hidden">
+        <div id="batch-header">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="2" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><rect x="16" y="2" width="6" height="6" rx="1"/>
+            <rect x="2" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/><rect x="16" y="9" width="6" height="6" rx="1"/>
+          </svg>
+          <h2>Batch Processing</h2>
+          <span id="batch-counter">0 / 0</span>
+        </div>
+        <div id="batch-progress">
+          <div id="batch-progress-fill"></div>
+        </div>
+        <div id="batch-list"></div>
+        <div id="batch-actions">
+          <button id="batch-cancel-btn">Cancel</button>
+          <button id="batch-open-btn" class="hidden">Open Output Folder</button>
+          <button id="batch-done-btn" class="hidden">New Batch</button>
+        </div>
+      </div>
+
+      <!-- Sprite Split Results -->
+      <div id="sprite-panel" class="hidden">
+        <div id="sprite-header">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="1" y="1" width="10" height="10" rx="1"/><rect x="13" y="1" width="10" height="10" rx="1"/>
+            <rect x="1" y="13" width="10" height="10" rx="1"/><rect x="13" y="13" width="10" height="10" rx="1"/>
+          </svg>
+          <h2>Sprites Found</h2>
+          <span id="sprite-count">0</span>
+        </div>
+        <div id="sprite-grid"></div>
+        <div id="sprite-actions">
+          <button id="sprite-save-btn">Save All</button>
+          <button id="sprite-reset-btn">New Image</button>
         </div>
       </div>
 
