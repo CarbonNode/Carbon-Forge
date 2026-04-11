@@ -409,7 +409,10 @@ async function processFile(file) {
     afterImg.src = url;
     afterImg.style.display = "block";
     beforeImg.style.clipPath = "inset(0 0% 0 100%)";
-    await new Promise((resolve) => { afterImg.onload = resolve; });
+    await new Promise((resolve, reject) => {
+      afterImg.onload = resolve;
+      afterImg.onerror = () => reject(new Error("Image failed to load"));
+    });
     resultBlob = new Blob([originalBytes], { type: file.type });
     actions.classList.remove("hidden");
     statusEl.textContent = "Edit mode";
@@ -451,7 +454,10 @@ async function runRemoval(arrayBuffer, animate = true) {
 
     const newUrl = URL.createObjectURL(resultBlob);
     afterImg.src = newUrl;
-    await new Promise((resolve) => { afterImg.onload = resolve; });
+    await new Promise((resolve, reject) => {
+      afterImg.onload = resolve;
+      afterImg.onerror = () => reject(new Error("Result image failed to load"));
+    });
 
     spinner.classList.remove("visible");
 

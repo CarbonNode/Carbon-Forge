@@ -6,7 +6,23 @@ const http = require("http");
 
 let pythonProcess = null;
 let mainWindow = null;
+let backendLogStream = null;
 const PORT = 5123;
+
+function getBackendLogPath() {
+  const dir = app.getPath("userData");
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  return path.join(dir, "backend.log");
+}
+
+function logBackend(line) {
+  if (!backendLogStream) {
+    try { backendLogStream = fs.createWriteStream(getBackendLogPath(), { flags: "a" }); } catch {}
+  }
+  const stamped = `[${new Date().toISOString()}] ${line}\n`;
+  if (backendLogStream) backendLogStream.write(stamped);
+  console.log(stamped.trimEnd());
+}
 
 function startBackend() {
   let cmd, args, opts;
@@ -22,24 +38,36 @@ function startBackend() {
     args = [serverPath, String(PORT)];
     opts = { shell: true, stdio: ["ignore", "pipe", "pipe"] };
   }
+  logBackend(`--- backend spawn: ${cmd} ${args.join(" ")} ---`);
   pythonProcess = spawn(cmd, args, opts);
 
   pythonProcess.stdout.on("data", (data) => {
     const msg = data.toString().trim();
-    console.log(`[backend] ${msg}`);
+    if (msg) logBackend(`[out] ${msg}`);
     if (msg.includes("MODEL_READY") && mainWindow) {
       mainWindow.webContents.send("backend-status", "ready");
     }
   });
 
   pythonProcess.stderr.on("data", (data) => {
-    console.error(`[backend] ${data.toString().trim()}`);
+    const msg = data.toString().trim();
+    if (msg) logBackend(`[err] ${msg}`);
   });
 
   pythonProcess.on("error", (err) => {
-    console.error("Failed to start backend:", err);
+    logBackend(`[spawn-error] ${err.message}`);
+  });
+
+  pythonProcess.on("exit", (code, signal) => {
+    logBackend(`[exit] code=${code} signal=${signal}`);
   });
 }
+
+ipcMain.handle("open-backend-log", async () => {
+  const p = getBackendLogPath();
+  if (fs.existsSync(p)) shell.openPath(p);
+  return p;
+});
 
 function waitForBackend(retries = 150) {
   return new Promise((resolve, reject) => {
@@ -123,13 +151,38 @@ ipcMain.handle("remove-bg", async (_event, buffer, settings = {}) => {
       (res) => {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () => resolve(Buffer.concat(chunks)));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks);
+          if (res.statusCode !== 200) {
+            let msg = `Backend error ${res.statusCode}`;
+            try {
+              const parsed = JSON.parse(body.toString());
+              if (parsed.error) msg += `: ${parsed.error}`;
+            } catch {
+              const preview = body.toString().slice(0, 300);
+              if (preview) msg += `: ${preview}`;
+            }
+            logBackend(`[remove-bg] ${msg}`);
+            return reject(new Error(msg));
+          }
+          if (body.length === 0) {
+            return reject(new Error("Backend returned empty response"));
+          }
+          if (body[0] !== 0x89 || body[1] !== 0x50 || body[2] !== 0x4e || body[3] !== 0x47) {
+            logBackend(`[remove-bg] non-PNG response (${body.length} bytes): ${body.toString().slice(0, 200)}`);
+            return reject(new Error("Backend returned non-PNG data"));
+          }
+          resolve(body);
+        });
       }
     );
-    req.on("error", reject);
+    req.on("error", (err) => {
+      logBackend(`[remove-bg] req error: ${err.message}`);
+      reject(err);
+    });
     req.on("timeout", () => {
       req.destroy();
-      reject(new Error("Request timed out"));
+      reject(new Error("Request timed out after 5 minutes"));
     });
     req.write(Buffer.from(buffer));
     req.end();
