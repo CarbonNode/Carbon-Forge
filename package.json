@@ -1,12 +1,12 @@
 {
   "name": "carbon-isolate",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "AI-powered background removal",
   "author": "Carbon Isolate",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build-backend": "pyinstaller --onedir --name carbon-isolate-backend --hidden-import=rembg --hidden-import=flask --hidden-import=scipy --hidden-import=scipy.ndimage --hidden-import=PIL --hidden-import=numpy --hidden-import=onnxruntime --collect-data rembg --noconfirm backend/server.py",
+    "build-backend": "pyinstaller --onedir --name carbon-isolate-backend --collect-all numpy --collect-submodules scipy --hidden-import=rembg --hidden-import=flask --hidden-import=PIL --hidden-import=onnxruntime --collect-data rembg --exclude-module torch --exclude-module torchvision --exclude-module tensorflow --noconfirm backend/server.py",
     "build": "electron-builder --win"
   },
   "build": {
