@@ -74,12 +74,43 @@ document.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropaga
 document.addEventListener("drop", (e) => { e.preventDefault(); e.stopPropagation(); });
 
 // Backend status
+let backendReady = false;
+const dropContent = document.getElementById("drop-content");
+const savedDropChildren = dropContent ? [...dropContent.childNodes] : [];
+
+function setDropZoneLoading() {
+  if (!dropContent) return;
+  while (dropContent.firstChild) dropContent.removeChild(dropContent.firstChild);
+  const spin = document.createElement("div");
+  spin.className = "loading-spinner";
+  const p = document.createElement("p");
+  p.textContent = "Loading AI engine...";
+  const hint = document.createElement("span");
+  hint.className = "hint";
+  hint.textContent = "First launch takes ~15-30 seconds";
+  dropContent.append(spin, p, hint);
+  dropZone.classList.add("loading");
+}
+
+function setDropZoneReady() {
+  if (!dropContent) return;
+  while (dropContent.firstChild) dropContent.removeChild(dropContent.firstChild);
+  for (const node of savedDropChildren) dropContent.appendChild(node);
+  dropZone.classList.remove("loading");
+}
+
+setDropZoneLoading();
+statusEl.textContent = "Starting AI engine...";
+statusEl.className = "";
+
 window.api.onBackendStatus((s) => {
   if (s === "ready") {
+    backendReady = true;
     statusEl.textContent = "Ready";
     statusEl.className = "ready";
+    setDropZoneReady();
   } else if (s === "error") {
-    statusEl.textContent = "Backend failed to start";
+    statusEl.textContent = "Backend failed to start — check backend.log";
     statusEl.className = "error";
   }
 });
@@ -226,6 +257,11 @@ dropZone.addEventListener("drop", (e) => {
   e.preventDefault();
   e.stopPropagation();
   dropZone.classList.remove("dragover");
+  if (!backendReady) {
+    statusEl.textContent = "AI engine still loading — wait for Ready";
+    statusEl.className = "error";
+    return;
+  }
   const files = [...e.dataTransfer.files].filter(isImageFile);
   if (files.length === 0) return;
 
@@ -237,6 +273,12 @@ dropZone.addEventListener("drop", (e) => {
 });
 
 fileInput.addEventListener("change", (e) => {
+  if (!backendReady) {
+    statusEl.textContent = "AI engine still loading — wait for Ready";
+    statusEl.className = "error";
+    fileInput.value = "";
+    return;
+  }
   const files = [...e.target.files].filter(isImageFile);
   if (files.length === 0) return;
 

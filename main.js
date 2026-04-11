@@ -7,6 +7,7 @@ const http = require("http");
 let pythonProcess = null;
 let mainWindow = null;
 let backendLogStream = null;
+let backendReady = false;
 const PORT = 5123;
 
 function getBackendLogPath() {
@@ -26,17 +27,22 @@ function logBackend(line) {
 
 function startBackend() {
   let cmd, args, opts;
+  const env = {
+    ...process.env,
+    PYTHONUNBUFFERED: "1",
+    PYTHONIOENCODING: "utf-8",
+  };
   if (app.isPackaged) {
     const backendExe = path.join(process.resourcesPath, "backend", "carbon-isolate-backend.exe");
     cmd = backendExe;
     args = [String(PORT)];
-    opts = { stdio: ["ignore", "pipe", "pipe"] };
+    opts = { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env };
   } else {
     const serverPath = path.join(__dirname, "backend", "server.py");
     const pythonCmd = process.platform === "win32" ? "python3.exe" : "python3";
     cmd = pythonCmd;
     args = [serverPath, String(PORT)];
-    opts = { shell: true, stdio: ["ignore", "pipe", "pipe"] };
+    opts = { shell: true, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env };
   }
   logBackend(`--- backend spawn: ${cmd} ${args.join(" ")} ---`);
   pythonProcess = spawn(cmd, args, opts);
@@ -44,7 +50,8 @@ function startBackend() {
   pythonProcess.stdout.on("data", (data) => {
     const msg = data.toString().trim();
     if (msg) logBackend(`[out] ${msg}`);
-    if (msg.includes("MODEL_READY") && mainWindow) {
+    if (msg.includes("MODEL_READY") && mainWindow && !backendReady) {
+      backendReady = true;
       mainWindow.webContents.send("backend-status", "ready");
     }
   });
@@ -69,7 +76,7 @@ ipcMain.handle("open-backend-log", async () => {
   return p;
 });
 
-function waitForBackend(retries = 150) {
+function waitForBackend(retries = 300) {
   return new Promise((resolve, reject) => {
     const check = (attempt) => {
       if (attempt >= retries) return reject(new Error("Backend timeout"));
@@ -106,6 +113,9 @@ function createWindow() {
 }
 
 ipcMain.handle("remove-bg", async (_event, buffer, settings = {}) => {
+  if (!backendReady) {
+    throw new Error("AI engine is still loading — wait for status to say Ready");
+  }
   const headers = {
     "Content-Type": "application/octet-stream",
   };
@@ -190,6 +200,9 @@ ipcMain.handle("remove-bg", async (_event, buffer, settings = {}) => {
 });
 
 ipcMain.handle("split-sprites", async (_event, buffer, settings = {}) => {
+  if (!backendReady) {
+    throw new Error("AI engine is still loading — wait for status to say Ready");
+  }
   const headers = {
     "Content-Type": "application/octet-stream",
   };
@@ -311,8 +324,11 @@ app.whenReady().then(async () => {
   createWindow();
   try {
     await waitForBackend();
+    backendReady = true;
+    logBackend("[ready] /health responded — backend ready");
     mainWindow.webContents.send("backend-status", "ready");
-  } catch {
+  } catch (e) {
+    logBackend(`[ready] timed out waiting for /health: ${e.message}`);
     mainWindow.webContents.send("backend-status", "error");
   }
 });
