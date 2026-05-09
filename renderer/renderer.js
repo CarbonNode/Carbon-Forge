@@ -66,6 +66,7 @@ let originalBytes = null;
 let pickedColors = [];
 let editOnlyMode = false;
 let splitMode = false;
+let trimMode = false;
 let batchCancelled = false;
 let spriteBlobs = []; // Array of Blobs for split sprites
 
@@ -76,26 +77,17 @@ document.addEventListener("drop", (e) => { e.preventDefault(); e.stopPropagation
 // Backend status
 let backendReady = false;
 const dropContent = document.getElementById("drop-content");
-const savedDropChildren = dropContent ? [...dropContent.childNodes] : [];
+const dropLoading = document.getElementById("drop-loading");
 
 function setDropZoneLoading() {
-  if (!dropContent) return;
-  while (dropContent.firstChild) dropContent.removeChild(dropContent.firstChild);
-  const spin = document.createElement("div");
-  spin.className = "loading-spinner";
-  const p = document.createElement("p");
-  p.textContent = "Loading AI engine...";
-  const hint = document.createElement("span");
-  hint.className = "hint";
-  hint.textContent = "First launch takes ~15-30 seconds";
-  dropContent.append(spin, p, hint);
+  if (dropContent) dropContent.classList.add("hidden");
+  if (dropLoading) dropLoading.classList.remove("hidden");
   dropZone.classList.add("loading");
 }
 
 function setDropZoneReady() {
-  if (!dropContent) return;
-  while (dropContent.firstChild) dropContent.removeChild(dropContent.firstChild);
-  for (const node of savedDropChildren) dropContent.appendChild(node);
+  if (dropLoading) dropLoading.classList.add("hidden");
+  if (dropContent) dropContent.classList.remove("hidden");
   dropZone.classList.remove("loading");
 }
 
@@ -257,7 +249,7 @@ dropZone.addEventListener("drop", (e) => {
   e.preventDefault();
   e.stopPropagation();
   dropZone.classList.remove("dragover");
-  if (!backendReady) {
+  if (!backendReady && !trimMode) {
     statusEl.textContent = "AI engine still loading — wait for Ready";
     statusEl.className = "error";
     return;
@@ -273,7 +265,7 @@ dropZone.addEventListener("drop", (e) => {
 });
 
 fileInput.addEventListener("change", (e) => {
-  if (!backendReady) {
+  if (!backendReady && !trimMode) {
     statusEl.textContent = "AI engine still loading — wait for Ready";
     statusEl.className = "error";
     fileInput.value = "";
@@ -294,13 +286,16 @@ fileInput.addEventListener("change", (e) => {
 function setMode(mode) {
   editOnlyMode = mode === "edit";
   splitMode = mode === "split";
+  trimMode = mode === "trim";
   document.getElementById("mode-remove").classList.toggle("active", mode === "remove");
   document.getElementById("mode-split").classList.toggle("active", mode === "split");
   document.getElementById("mode-edit").classList.toggle("active", mode === "edit");
+  document.getElementById("mode-trim").classList.toggle("active", mode === "trim");
 }
 document.getElementById("mode-remove").addEventListener("click", () => setMode("remove"));
 document.getElementById("mode-split").addEventListener("click", () => setMode("split"));
 document.getElementById("mode-edit").addEventListener("click", () => setMode("edit"));
+document.getElementById("mode-trim").addEventListener("click", () => setMode("trim"));
 
 // Sparkle particle system
 function emitParticles(containerEl, durationMs) {
@@ -388,6 +383,54 @@ function playReveal() {
   emitParticles(container, animDuration);
 }
 
+async function trimTransparentBlob(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise((res, rej) => {
+      img.onload = res;
+      img.onerror = () => rej(new Error("Image failed to decode"));
+      img.src = url;
+    });
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, w, h).data;
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (data[(y * w + x) * 4 + 3] > 0) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < 0) throw new Error("Image is fully transparent");
+    minX = Math.max(0, minX - 1);
+    minY = Math.max(0, minY - 1);
+    maxX = Math.min(w - 1, maxX + 1);
+    maxY = Math.min(h - 1, maxY + 1);
+    const cw = maxX - minX + 1;
+    const ch = maxY - minY + 1;
+    const crop = document.createElement("canvas");
+    crop.width = cw;
+    crop.height = ch;
+    crop.getContext("2d").drawImage(canvas, -minX, -minY);
+    const blob = await new Promise((res, rej) =>
+      crop.toBlob(b => b ? res(b) : rej(new Error("toBlob returned null")), "image/png")
+    );
+    return { blob, originalSize: [w, h], trimmedSize: [cw, ch] };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
 async function processFile(file) {
   originalName = file.name.replace(/\.[^.]+$/, "");
 
@@ -395,6 +438,37 @@ async function processFile(file) {
   originalBytes = new Uint8Array(buffer);
 
   dropZone.classList.add("hidden");
+
+  if (trimMode) {
+    preview.classList.remove("hidden");
+    actions.classList.add("hidden");
+    spinner.classList.add("visible");
+    spinnerText.textContent = "Trimming...";
+    statusEl.textContent = "Trimming transparent edges...";
+    statusEl.className = "";
+    beforeImg.src = URL.createObjectURL(file);
+    try {
+      const { blob, originalSize, trimmedSize } = await trimTransparentBlob(file);
+      resultBlob = blob;
+      const newUrl = URL.createObjectURL(blob);
+      afterImg.src = newUrl;
+      await new Promise((resolve, reject) => {
+        afterImg.onload = resolve;
+        afterImg.onerror = () => reject(new Error("Trimmed image failed to load"));
+      });
+      spinner.classList.remove("visible");
+      afterImg.style.display = "block";
+      beforeImg.style.clipPath = "inset(0 0% 0 100%)";
+      actions.classList.remove("hidden");
+      statusEl.textContent = `Trimmed ${originalSize[0]}x${originalSize[1]} -> ${trimmedSize[0]}x${trimmedSize[1]}`;
+      statusEl.className = "ready";
+    } catch (err) {
+      spinner.classList.remove("visible");
+      statusEl.textContent = "Trim failed - " + err.message;
+      statusEl.className = "error";
+    }
+    return;
+  }
 
   if (splitMode) {
     // Split sprites mode
@@ -503,18 +577,29 @@ async function runRemoval(arrayBuffer, animate = true) {
 
     spinner.classList.remove("visible");
 
+    const doneText = `Done — ${afterImg.naturalWidth}x${afterImg.naturalHeight}`;
     if (animate) {
       playReveal();
       setTimeout(() => {
         actions.classList.remove("hidden");
-        statusEl.textContent = "Done!";
+        // After the wipe, show the result at its natural size so trim is visible.
+        // Must remove .reveal class to clear the animation's forwards-fill clip-path.
+        beforeImg.src = afterImg.src;
+        beforeImg.classList.remove("reveal");
+        beforeImg.style.clipPath = "none";
+        afterImg.style.display = "none";
+        wipeLine.classList.remove("animate");
+        statusEl.textContent = doneText;
         statusEl.className = "ready";
       }, 1300);
     } else {
-      afterImg.style.display = "block";
-      beforeImg.style.clipPath = "inset(0 0% 0 100%)";
+      beforeImg.src = afterImg.src;
+      beforeImg.classList.remove("reveal");
+      beforeImg.style.clipPath = "none";
+      afterImg.style.display = "none";
+      wipeLine.classList.remove("animate");
       actions.classList.remove("hidden");
-      statusEl.textContent = "Done!";
+      statusEl.textContent = doneText;
       statusEl.className = "ready";
     }
   } catch (err) {
@@ -586,13 +671,19 @@ async function startBatch(files) {
     row.scrollIntoView({ behavior: "smooth", block: "nearest" });
 
     try {
-      const buffer = await file.arrayBuffer();
-      const settings = getSettings();
-      // Batch always does full pipeline (no skipBg)
-      const resultBuffer = await window.api.removeBg(buffer, settings);
+      let resultBuffer;
+      let outSuffix = "-nobg.png";
+      if (trimMode) {
+        const { blob } = await trimTransparentBlob(file);
+        resultBuffer = await blob.arrayBuffer();
+        outSuffix = "-trim.png";
+      } else {
+        const buffer = await file.arrayBuffer();
+        const settings = getSettings();
+        resultBuffer = await window.api.removeBg(buffer, settings);
+      }
 
-      // Save to output directory
-      const outName = file.name.replace(/\.[^.]+$/, "") + "-nobg.png";
+      const outName = file.name.replace(/\.[^.]+$/, "") + outSuffix;
       const outPath = outDir.replace(/\\/g, "/") + "/" + outName;
       await window.api.saveToPath(resultBuffer, outPath);
 

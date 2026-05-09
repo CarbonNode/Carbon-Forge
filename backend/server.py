@@ -3,11 +3,18 @@ import io
 import json
 import os
 import numpy as np
+import traceback
 from PIL import Image
 from scipy.ndimage import gaussian_filter, binary_dilation, binary_erosion, label
 import base64
 from flask import Flask, request, Response, jsonify
 from rembg import remove, new_session
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
 
 try:
     import onnxruntime as ort
@@ -301,7 +308,7 @@ def trim_transparent(img_bytes):
 
     cropped = img.crop((cmin, rmin, cmax + 1, rmax + 1))
 
-    print(f"Trim: {img.width}x{img.height} → {cropped.width}x{cropped.height}", flush=True)
+    print(f"Trim: {img.width}x{img.height} -> {cropped.width}x{cropped.height}", flush=True)
 
     buf = io.BytesIO()
     cropped.save(buf, format="PNG")
@@ -412,6 +419,15 @@ def watermark_status():
         "modelLoaded": lama_session is not None,
         "modelPath": LAMA_MODEL_PATH,
     })
+
+
+@app.errorhandler(Exception)
+def _json_error(e):
+    if hasattr(e, "code") and isinstance(getattr(e, "code", None), int):
+        return jsonify({"error": str(e)}), e.code
+    print(f"Unhandled exception: {e}", flush=True)
+    traceback.print_exc()
+    return jsonify({"error": f"{type(e).__name__}: {e}"}), 500
 
 
 @app.post("/remove-bg")
