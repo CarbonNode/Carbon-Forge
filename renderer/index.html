@@ -24,6 +24,18 @@
       <!-- Settings Panel -->
       <div id="settings">
         <button id="settings-close" title="Close">&times;</button>
+
+        <!-- Background mode -->
+        <div class="setting-group">
+          <label>
+            <input type="checkbox" id="start-with-windows" />
+            Start with Windows
+            <span class="setting-hint">Launches hidden in tray at boot — backend warm by the time you need it</span>
+          </label>
+        </div>
+
+        <div class="setting-divider"></div>
+
         <div class="setting-group">
           <label>Model</label>
           <select id="model-select">
@@ -165,7 +177,7 @@
         <div id="drop-loading" class="hidden">
           <div class="loading-spinner"></div>
           <p>Loading AI engine...</p>
-          <span class="hint">First launch takes ~15-30 seconds</span>
+          <span class="hint">First launch can take up to a minute. Tip: enable "Start with Windows" in Settings so the backend is always warm.</span>
         </div>
         <input type="file" id="file-input" accept="image/*" multiple />
       </div>

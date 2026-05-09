@@ -16,4 +16,8 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.invoke("save-to-path", buffer, filePath),
   openPath: (dirPath) => ipcRenderer.invoke("open-path", dirPath),
   openBackendLog: () => ipcRenderer.invoke("open-backend-log"),
+
+  // App settings
+  getSettings: () => ipcRenderer.invoke("get-settings"),
+  setSetting: (key, value) => ipcRenderer.invoke("set-setting", key, value),
 });

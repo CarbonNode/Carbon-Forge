@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage } = require("electron");
 const { spawn } = require("child_process");
 const path = require("path");
 const fs = require("fs");
@@ -6,8 +6,59 @@ const http = require("http");
 
 let pythonProcess = null;
 let mainWindow = null;
+let tray = null;
+let isQuitting = false;
 let backendLogStream = null;
 let backendReady = false;
+const startedHidden = process.argv.includes("--hidden");
+
+function getSettingsPath() {
+  const dir = app.getPath("userData");
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  return path.join(dir, "settings.json");
+}
+
+function loadSettings() {
+  try {
+    return JSON.parse(fs.readFileSync(getSettingsPath(), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveSettings(s) {
+  try {
+    fs.writeFileSync(getSettingsPath(), JSON.stringify(s, null, 2));
+  } catch (e) {
+    if (typeof logBackend === "function") logBackend(`[settings] save failed: ${e.message}`);
+  }
+}
+
+function showMainWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) mainWindow.show();
+  mainWindow.focus();
+}
+
+function createTray() {
+  if (tray) return;
+  try {
+    const iconPath = path.join(__dirname, "icon.ico");
+    const image = nativeImage.createFromPath(iconPath);
+    tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
+    tray.setToolTip("Carbon Isolate");
+    const menu = Menu.buildFromTemplate([
+      { label: "Show Carbon Isolate", click: () => showMainWindow() },
+      { type: "separator" },
+      { label: "Quit", click: () => { isQuitting = true; app.quit(); } },
+    ]);
+    tray.setContextMenu(menu);
+    tray.on("click", () => showMainWindow());
+  } catch (e) {
+    if (typeof logBackend === "function") logBackend(`[tray] failed to create: ${e.message}`);
+  }
+}
 const PORT = 5123;
 
 function getBackendLogPath() {
@@ -102,6 +153,7 @@ function createWindow() {
     autoHideMenuBar: true,
     icon: path.join(__dirname, "icon.ico"),
     title: "Carbon Isolate",
+    show: !startedHidden,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -110,6 +162,14 @@ function createWindow() {
   });
 
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
+
+  // Close button hides to tray instead of quitting
+  mainWindow.on("close", (e) => {
+    if (!isQuitting) {
+      e.preventDefault();
+      mainWindow.hide();
+    }
+  });
 }
 
 ipcMain.handle("remove-bg", async (_event, buffer, settings = {}) => {
@@ -312,24 +372,41 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on("second-instance", () => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    showMainWindow();
   });
 }
+
+ipcMain.handle("get-settings", () => loadSettings());
+ipcMain.handle("set-setting", (_e, key, value) => {
+  const s = loadSettings();
+  s[key] = value;
+  saveSettings(s);
+  if (key === "startWithWindows") {
+    try {
+      app.setLoginItemSettings({
+        openAtLogin: !!value,
+        openAsHidden: true,
+        args: ["--hidden"],
+      });
+    } catch (e) {
+      logBackend(`[settings] setLoginItemSettings failed: ${e.message}`);
+    }
+  }
+  return s;
+});
 
 app.whenReady().then(async () => {
   startBackend();
   createWindow();
+  createTray();
   try {
     await waitForBackend();
     backendReady = true;
     logBackend("[ready] /health responded — backend ready");
-    mainWindow.webContents.send("backend-status", "ready");
+    if (mainWindow) mainWindow.webContents.send("backend-status", "ready");
   } catch (e) {
     logBackend(`[ready] timed out waiting for /health: ${e.message}`);
-    mainWindow.webContents.send("backend-status", "error");
+    if (mainWindow) mainWindow.webContents.send("backend-status", "error");
   }
 });
 
@@ -344,4 +421,7 @@ app.on("will-quit", () => {
   }
 });
 
-app.on("window-all-closed", () => app.quit());
+// Don't quit when window closes — tray keeps backend warm. Quit explicitly via tray.
+app.on("window-all-closed", () => {
+  if (process.platform !== "win32") app.quit();
+});

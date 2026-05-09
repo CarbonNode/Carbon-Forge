@@ -107,6 +107,17 @@ window.api.onBackendStatus((s) => {
   }
 });
 
+// Background-mode setting (Start with Windows)
+const startWithWindows = document.getElementById("start-with-windows");
+if (startWithWindows && window.api.getSettings) {
+  window.api.getSettings().then((s) => {
+    startWithWindows.checked = !!(s && s.startWithWindows);
+  }).catch(() => {});
+  startWithWindows.addEventListener("change", () => {
+    window.api.setSetting("startWithWindows", startWithWindows.checked).catch(() => {});
+  });
+}
+
 // Settings panel toggle
 settingsToggle.addEventListener("click", () => {
   settingsPanel.classList.toggle("visible");
