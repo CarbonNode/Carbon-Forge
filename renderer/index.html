@@ -25,6 +25,15 @@
       <div id="settings">
         <button id="settings-close" title="Close">&times;</button>
 
+        <!-- Gemini API key -->
+        <div class="setting-group">
+          <label>Gemini API Key</label>
+          <input type="password" id="gemini-key" placeholder="ya29.… or AIza…" autocomplete="off" />
+          <span class="setting-hint">Used for image generation. Stored locally only. <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style="color:#e94560">Get a key</a></span>
+        </div>
+
+        <div class="setting-divider"></div>
+
         <!-- Background mode -->
         <div class="setting-group">
           <label>
@@ -160,18 +169,21 @@
 
       <div id="drop-zone">
         <div id="drop-content">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#666" stroke-width="1.5">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="17 8 12 3 7 8" />
-            <line x1="12" y1="3" x2="12" y2="15" />
-          </svg>
-          <p>Drop image(s) here</p>
-          <span class="hint">or click to browse &mdash; multiple files for batch mode</span>
+          <div id="drop-icon-wrap">
+            <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+          </div>
+          <h2 id="drop-title">Drop image(s) here</h2>
+          <span class="hint">or click to browse &mdash; multiple files run in batch</span>
           <div id="mode-toggle">
-            <button id="mode-remove" class="mode-btn active">Remove Background</button>
-            <button id="mode-split" class="mode-btn">Split Sprites</button>
-            <button id="mode-edit" class="mode-btn">Edit Only</button>
+            <button id="mode-remove" class="mode-btn active">Remove BG</button>
+            <button id="mode-split" class="mode-btn">Split</button>
+            <button id="mode-edit" class="mode-btn">Edit</button>
             <button id="mode-trim" class="mode-btn">Trim</button>
+            <button id="mode-generate" class="mode-btn mode-btn-primary">Generate</button>
           </div>
         </div>
         <div id="drop-loading" class="hidden">
@@ -215,6 +227,117 @@
           <button id="batch-cancel-btn">Cancel</button>
           <button id="batch-open-btn" class="hidden">Open Output Folder</button>
           <button id="batch-done-btn" class="hidden">New Batch</button>
+        </div>
+      </div>
+
+      <!-- Generate Section (tabs + form + results) -->
+      <div id="gen-section" class="hidden">
+        <div id="gen-header">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.582a.5.5 0 0 1 0 .962L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/>
+          </svg>
+          <h2 id="gen-section-title">Generate</h2>
+          <button id="gen-back-btn" title="Back to file modes">&larr; Back</button>
+        </div>
+
+        <!-- Tabs row -->
+        <div id="gen-tabs-row">
+          <div id="gen-tabs" role="tablist"></div>
+          <button id="gen-new-tab-btn" type="button" title="New tab" aria-label="New tab">+</button>
+        </div>
+
+        <!-- Form view -->
+        <div id="gen-panel" class="hidden">
+          <div id="gen-form">
+            <!-- Model picker -->
+            <div id="gen-model-row">
+              <span class="gen-refs-label">MODEL</span>
+              <select id="gen-model-select"></select>
+              <span id="gen-model-note"></span>
+            </div>
+
+            <textarea id="gen-prompt" rows="4" placeholder="Describe what you want — e.g. a friendly robot mascot, flat illustration, plain white background, vibrant colors"></textarea>
+
+            <div id="gen-themes-row">
+              <span class="gen-refs-label">THEMES</span>
+              <div id="gen-themes-chips"></div>
+              <button id="gen-theme-add-btn" type="button" title="Save a reusable text snippet">+ New theme</button>
+            </div>
+
+            <div id="gen-refs-row">
+              <span class="gen-refs-label">REFS</span>
+              <div id="gen-refs-thumbs"></div>
+              <button id="gen-lib-btn" type="button">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+                Library
+              </button>
+              <button id="gen-quick-ref-btn" type="button" title="Add a one-off reference (not saved)">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Quick
+              </button>
+              <input type="file" id="gen-quick-ref-input" accept="image/*" />
+            </div>
+
+            <!-- Video-only controls (shown for Veo models) -->
+            <div id="gen-video-controls" class="gen-controls hidden">
+              <div class="gen-inline">
+                <span class="gen-inline-label">Length</span>
+                <select id="gen-length">
+                  <option value="4">4s</option>
+                  <option value="6">6s</option>
+                  <option value="8" selected>8s</option>
+                </select>
+              </div>
+              <div class="gen-inline">
+                <span class="gen-inline-label">Aspect</span>
+                <select id="gen-aspect">
+                  <option value="16:9" selected>16:9</option>
+                  <option value="9:16">9:16</option>
+                </select>
+              </div>
+              <label class="gen-inline gen-checkbox-inline" title="Veo 3 generates audio by default">
+                <input type="checkbox" id="gen-audio" checked />
+                <span class="gen-inline-label">Audio</span>
+              </label>
+            </div>
+
+            <div class="gen-controls">
+              <div class="gen-inline">
+                <span class="gen-inline-label">Count</span>
+                <input type="number" id="gen-count" min="1" max="12" value="4" />
+              </div>
+              <div class="gen-inline" id="gen-cutout-wrap">
+                <span class="gen-inline-label">Cutout</span>
+                <select id="gen-cutout-mode">
+                  <option value="figure" selected>Figure</option>
+                  <option value="object">Object</option>
+                  <option value="none">None</option>
+                </select>
+              </div>
+              <span id="gen-status"></span>
+              <span id="gen-cost" title="Estimated cost — approximate"></span>
+              <button id="gen-go-btn">Generate</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Results view -->
+        <div id="gen-results-panel" class="hidden">
+          <div id="gen-results-header">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="1" y="1" width="10" height="10" rx="1"/><rect x="13" y="1" width="10" height="10" rx="1"/>
+              <rect x="1" y="13" width="10" height="10" rx="1"/><rect x="13" y="13" width="10" height="10" rx="1"/>
+            </svg>
+            <h2 id="gen-results-title">Generated</h2>
+            <span id="gen-results-count">0</span>
+          </div>
+          <div id="gen-results-grid"></div>
+          <div id="gen-results-actions">
+            <button id="gen-again-btn">&larr; Edit Prompt</button>
+            <button id="gen-save-all-btn">Save All</button>
+            <button id="gen-cancel-btn" class="hidden">Cancel</button>
+            <button id="gen-reset-btn">Clear</button>
+          </div>
         </div>
       </div>
 
@@ -295,6 +418,52 @@
 
     <div id="color-preview-tooltip"><div class="swatch"></div><span></span></div>
     <div id="brush-cursor"></div>
+
+    <div id="loading-floater" class="hidden">
+      <div class="loading-floater-spin"></div>
+      <div class="loading-floater-text">
+        <strong id="loading-floater-title">Loading AI engine…</strong>
+        <span class="loading-floater-hint" id="loading-floater-hint">You can use Generate while it warms up</span>
+      </div>
+      <button id="loading-floater-close" title="Dismiss">&times;</button>
+      <div class="loading-floater-progress"><div class="loading-floater-progress-bar"></div></div>
+    </div>
+
+    <!-- Reference Library Modal -->
+    <div id="lib-modal" class="hidden" role="dialog" aria-modal="true" aria-labelledby="lib-title">
+      <div id="lib-backdrop"></div>
+      <div id="lib-card">
+        <div id="lib-header">
+          <h2 id="lib-title">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            Reference Library
+          </h2>
+          <button id="lib-close" class="lib-close-btn" title="Close">&times;</button>
+        </div>
+        <div id="lib-toolbar">
+          <div id="lib-add-area">
+            <button id="lib-add-btn">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              Add Image
+            </button>
+            <input type="file" id="lib-add-input" accept="image/*" multiple />
+            <span class="lib-hint">or drop image(s) anywhere here</span>
+          </div>
+          <div id="lib-category-chips"></div>
+        </div>
+        <div id="lib-grid-wrap">
+          <div id="lib-grid"></div>
+          <div id="lib-empty" class="hidden">No references yet — drop image(s) or click <strong>Add Image</strong></div>
+        </div>
+        <div id="lib-footer">
+          <span id="lib-selected-count">0 selected</span>
+          <button id="lib-cancel-btn">Cancel</button>
+          <button id="lib-use-btn" disabled>Use Selected</button>
+        </div>
+        <datalist id="lib-categories-list"></datalist>
+      </div>
+    </div>
+
     <script src="renderer.js"></script>
   </body>
 </html>
