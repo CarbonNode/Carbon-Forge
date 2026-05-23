@@ -10,6 +10,7 @@ let tray = null;
 let isQuitting = false;
 let backendLogStream = null;
 let backendReady = false;
+let backendFailed = false;
 const startedHidden = process.argv.includes("--hidden");
 
 function getSettingsPath() {
@@ -125,6 +126,14 @@ ipcMain.handle("open-backend-log", async () => {
   const p = getBackendLogPath();
   if (fs.existsSync(p)) shell.openPath(p);
   return p;
+});
+
+// Renderer can poll on startup to avoid the IPC race where the
+// "backend-status" push fires before the renderer's listener is registered.
+ipcMain.handle("get-backend-status", () => {
+  if (backendReady) return "ready";
+  if (backendFailed) return "error";
+  return "loading";
 });
 
 function waitForBackend(retries = 300) {
@@ -895,6 +904,7 @@ app.whenReady().then(async () => {
     if (mainWindow) mainWindow.webContents.send("backend-status", "ready");
   } catch (e) {
     logBackend(`[ready] timed out waiting for /health: ${e.message}`);
+    backendFailed = true;
     if (mainWindow) mainWindow.webContents.send("backend-status", "error");
   }
 });

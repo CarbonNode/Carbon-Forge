@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.invoke("split-sprites", buffer, settings),
   onBackendStatus: (callback) =>
     ipcRenderer.on("backend-status", (_event, status) => callback(status)),
+  getBackendStatus: () => ipcRenderer.invoke("get-backend-status"),
 
   // Batch processing
   selectDirectory: () => ipcRenderer.invoke("select-directory"),

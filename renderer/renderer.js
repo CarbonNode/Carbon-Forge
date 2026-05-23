@@ -99,8 +99,9 @@ showLoaderFloater("loading", "Loading AI engine…", "You can set up Generate, a
 statusEl.textContent = "Starting AI engine...";
 statusEl.className = "";
 
-window.api.onBackendStatus((s) => {
+function applyBackendStatus(s) {
   if (s === "ready") {
+    if (backendReady) return;
     backendReady = true;
     statusEl.textContent = "Ready";
     statusEl.className = "ready";
@@ -111,7 +112,15 @@ window.api.onBackendStatus((s) => {
     statusEl.className = "error";
     showLoaderFloater("error", "AI engine failed to start", "Check backend.log via the gear menu. Generate still works without it.");
   }
-});
+}
+
+window.api.onBackendStatus(applyBackendStatus);
+
+// Close the IPC race: if main fired "ready" before this renderer subscribed,
+// the push was lost. Poll once now to catch up.
+if (window.api.getBackendStatus) {
+  window.api.getBackendStatus().then(applyBackendStatus).catch(() => {});
+}
 
 // Background-mode setting (Start with Windows)
 const startWithWindows = document.getElementById("start-with-windows");
