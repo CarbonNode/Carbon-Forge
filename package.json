@@ -1,24 +1,24 @@
 {
-  "name": "carbon-isolate",
+  "name": "carbon-forge",
   "version": "1.2.1",
-  "description": "AI-powered background removal",
-  "author": "Carbon Isolate",
+  "description": "AI-powered asset generation & refinement",
+  "author": "Carbon Forge",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "build-backend": "pyinstaller --onedir --name carbon-isolate-backend --collect-all numpy --collect-submodules scipy --hidden-import=rembg --hidden-import=flask --hidden-import=PIL --hidden-import=onnxruntime --collect-data rembg --copy-metadata pymatting --copy-metadata rembg --copy-metadata onnxruntime --copy-metadata numpy --copy-metadata scipy --copy-metadata pillow --copy-metadata pooch --copy-metadata scikit-image --copy-metadata tqdm --exclude-module torch --exclude-module torchvision --exclude-module tensorflow --noconfirm backend/server.py",
+    "build-backend": "pyinstaller --onedir --name carbon-forge-backend --collect-all numpy --collect-submodules scipy --hidden-import=rembg --hidden-import=flask --hidden-import=PIL --hidden-import=onnxruntime --collect-data rembg --copy-metadata pymatting --copy-metadata rembg --copy-metadata onnxruntime --copy-metadata numpy --copy-metadata scipy --copy-metadata pillow --copy-metadata pooch --copy-metadata scikit-image --copy-metadata tqdm --exclude-module torch --exclude-module torchvision --exclude-module tensorflow --noconfirm backend/server.py",
     "build": "electron-builder --win"
   },
   "build": {
-    "appId": "com.carbonisolate.app",
-    "productName": "Carbon Isolate",
+    "appId": "com.carbonforge.app",
+    "productName": "Carbon Forge",
     "directories": {
       "output": "dist"
     },
     "win": {
       "target": "nsis",
       "icon": "icon.ico",
-      "executableName": "Carbon Isolate"
+      "executableName": "Carbon Forge"
     },
     "nsis": {
       "oneClick": false,
@@ -31,12 +31,12 @@
       "main.js",
       "preload.js",
       "icon.ico",
-      "Carbon Isolate Icon.png",
+      "Carbon Forge Icon.png",
       "renderer/**/*"
     ],
     "extraResources": [
       {
-        "from": "dist/carbon-isolate-backend",
+        "from": "dist/carbon-forge-backend",
         "to": "backend",
         "filter": ["**/*"]
       }

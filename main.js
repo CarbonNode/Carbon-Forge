@@ -48,9 +48,9 @@ function createTray() {
     const iconPath = path.join(__dirname, "icon.ico");
     const image = nativeImage.createFromPath(iconPath);
     tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
-    tray.setToolTip("Carbon Isolate");
+    tray.setToolTip("Carbon Forge");
     const menu = Menu.buildFromTemplate([
-      { label: "Show Carbon Isolate", click: () => showMainWindow() },
+      { label: "Show Carbon Forge", click: () => showMainWindow() },
       { type: "separator" },
       { label: "Quit", click: () => { isQuitting = true; app.quit(); } },
     ]);
@@ -85,7 +85,7 @@ function startBackend() {
     PYTHONIOENCODING: "utf-8",
   };
   if (app.isPackaged) {
-    const backendExe = path.join(process.resourcesPath, "backend", "carbon-isolate-backend.exe");
+    const backendExe = path.join(process.resourcesPath, "backend", "carbon-forge-backend.exe");
     cmd = backendExe;
     args = [String(PORT)];
     opts = { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env };
@@ -161,7 +161,7 @@ function createWindow() {
     backgroundColor: "#0d0d0d",
     autoHideMenuBar: true,
     icon: path.join(__dirname, "icon.ico"),
-    title: "Carbon Isolate",
+    title: "Carbon Forge",
     show: !startedHidden,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
