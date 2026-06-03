@@ -1,0 +1,29 @@
+name: carbon-forge
+
+# Carbon Forge MCP service — runs on laybackrig (192.168.0.177).
+# /workspace is a CIFS mount of carbonserver's C:\Workspace (Conduit project folders),
+# so results land directly in project workspaces. Models + results persist in volumes.
+services:
+  forge:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    image: carbon-forge-mcp
+    ports:
+      - "5125:5125"
+    env_file: .env
+    volumes:
+      - forge-models:/models
+      - forge-results:/results
+      - workspace:/workspace
+    restart: unless-stopped
+
+volumes:
+  forge-models:
+  forge-results:
+  workspace:
+    driver: local
+    driver_opts:
+      type: cifs
+      o: "username=${CIFS_USERNAME},password=${CIFS_PASSWORD},vers=3.0,addr=192.168.0.35,file_mode=0666,dir_mode=0777"
+      device: "//192.168.0.35/Workspace"

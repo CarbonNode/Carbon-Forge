@@ -1,0 +1,13 @@
+node_modules
+dist
+build
+renderer
+docs
+.git
+*.png
+*.ico
+backend/models
+backend/__pycache__
+forge_mcp/__pycache__
+tests
+.env

@@ -5,3 +5,4 @@ __pycache__/
 *.spec
 icon-cropped.png
 backend/models/
+.env
