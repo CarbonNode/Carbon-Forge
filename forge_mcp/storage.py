@@ -183,8 +183,10 @@ async def save_result(data: bytes, *, project, subpath, filename, ext, cfg: Conf
             await asyncio.to_thread(_makedirs, target_dir)
             target = await asyncio.to_thread(_unique_path, target_dir, base, ext)
             await asyncio.to_thread(_write_file, target, data)
-            rel_to_root = os.path.relpath(target, cfg.workspace_root)
-            result["workspace_path"] = os.path.join(cfg.workspace_display_root, rel_to_root)
+            # Display path is always Windows-style (the workspace lives on carbonserver),
+            # regardless of the container OS this runs on.
+            rel_to_root = os.path.relpath(target, cfg.workspace_root).replace("/", "\\")
+            result["workspace_path"] = cfg.workspace_display_root.rstrip("\\") + "\\" + rel_to_root
         except (StorageError, OSError) as e:
             result["workspace_write_error"] = (
                 f"Result NOT written to the workspace ({e}). It is still available at the url above."
