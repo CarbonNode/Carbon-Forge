@@ -1,13 +1,20 @@
 """Carbon Forge MCP service — assembly + entry point."""
+import asyncio
+import contextlib
 import hmac
 import os
+import types
 
+import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse, FileResponse
 from starlette.routing import Route
 
+from forge_mcp import engine, storage
 from forge_mcp.config import load_config
+from forge_mcp.jobs import JobStore
+from forge_mcp.tools import register_all
 
 cfg = load_config()
 
@@ -23,6 +30,14 @@ mcp = FastMCP(
     # makes DNS-rebinding moot (browsers can't forge the Authorization header).
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
+
+ctx = types.SimpleNamespace(
+    cfg=cfg,
+    jobs=JobStore(os.path.join(cfg.results_root, "jobs.json")),
+    http=None,             # created inside lifespan
+    poll_and_finish=None,  # set by tools.gen.register
+)
+register_all(mcp, ctx)
 
 
 class BearerAuthMiddleware:
@@ -60,10 +75,39 @@ async def serve_file(request):
     return FileResponse(path)
 
 
+async def _resume_job(job: dict):
+    """Resume polling a Veo job that survived a restart; failures become readable status."""
+    try:
+        await ctx.poll_and_finish(job["id"], job["operation_name"])
+    except Exception as e:
+        ctx.jobs.update(job["id"], status="failed", error=str(e))
+
+
 def build_app():
     app = mcp.streamable_http_app()
     app.router.routes.append(Route("/health", health, methods=["GET"]))
     app.router.routes.append(Route("/files/{file_id}/{name}", serve_file, methods=["GET"]))
+
+    original_lifespan = app.router.lifespan_context
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app_):
+        async with original_lifespan(app_):
+            ctx.http = httpx.AsyncClient(timeout=120)
+            background = [
+                asyncio.create_task(storage.janitor_loop(cfg)),
+                asyncio.create_task(engine.preload_default_model()),
+            ]
+            for job in ctx.jobs.mark_interrupted():  # resume Veo polls that survived restart
+                background.append(asyncio.create_task(_resume_job(job)))
+            try:
+                yield
+            finally:
+                for t in background:
+                    t.cancel()
+                await ctx.http.aclose()
+
+    app.router.lifespan_context = lifespan
     return BearerAuthMiddleware(app, cfg.token)
 
 
