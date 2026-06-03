@@ -1,0 +1,8 @@
+mcp>=1.12,<2
+uvicorn>=0.30
+httpx>=0.27
+rembg==2.0.*
+pillow>=10
+numpy
+scipy
+onnxruntime>=1.17.0
