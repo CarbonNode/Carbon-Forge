@@ -33,7 +33,16 @@ def register(mcp, ctx):
         '<Project>/<relative path>'. Optional pipeline steps: watermark removal first, then
         color removal, edge smoothing, and transparent-edge trim. Models: u2net (default),
         u2netp (fast), u2net_human_seg, isnet-general-use, silueta. Saves into the project's
-        workspace folder (subpath default assets/forge) and returns the path + a shareable URL."""
+        workspace folder (subpath default assets/forge) and returns the path + a shareable URL.
+
+        CLEAN-CUTOUT RECIPE (use this, not bare defaults — bare defaults leave a grey/white
+        'sticker halo', worst on pale subjects shot on a light background): pass
+        model='isnet-general-use' (handles holes/negative space far better than u2net),
+        alpha_matting=true, edge_smooth=true, auto_trim=true. If the source was generated on a
+        flat solid background (the recommended way — see generate_image), also pass
+        color_remove=true + color_auto_detect=true to strip the residual background fringe.
+        Halo on an ALREADY-cut transparent image? Rescue it with smooth_edges(trim_px~6,
+        strength~3) to erode + defringe the matte."""
         src = await storage.resolve_input(image, cfg=cfg, kind="image")
         opts = PipelineOptions(
             model=model, alpha_matting=alpha_matting, fg_threshold=fg_threshold,

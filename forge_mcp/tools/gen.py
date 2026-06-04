@@ -18,7 +18,22 @@ def register(mcp, ctx):
                              subpath: str | None = None, filename: str | None = None) -> dict:
         """Generate image(s) from a text prompt with Imagen 4.
         model: imagen-4 | imagen-4-fast | imagen-4-ultra. count: 1-4 (ultra max 1).
-        aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9. Saves into the project's workspace folder."""
+        aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9. Saves into the project's workspace folder.
+
+        CUT-OUT ASSETS (REQUIRED when the image will later be background-removed — sprites,
+        character/object cutouts, stickers, anything destined for remove_background): a vague
+        prompt produces a halo'd, hard-to-key result. You MUST prompt for ALL of:
+          - a single COMPLETELY FLAT, uniform, solid background color (no gradient, texture,
+            scenery, or ground shadow);
+          - a background color FAR from every color in the subject — never green for a
+            green-skinned subject, never white for a pale/light subject. Safe default: solid
+            magenta #FF00FF (far from skin, steel, brown, foliage). State the hex explicitly;
+          - that same flat color must also FILL ALL NEGATIVE SPACE *between* limbs, props,
+            and weapons (e.g. between two hands gripping a handle, inside a drawn bow) so no
+            interior background gets trapped during keying;
+          - a crisp clean silhouette, no outline/border, no vignette, no drop shadow.
+        Then cut with remove_background(model='isnet-general-use', alpha_matting=true,
+        color_remove=true, color_auto_detect=true, edge_smooth=true, auto_trim=true)."""
         _require_key()
         if aspect_ratio not in g.IMAGE_ASPECTS:
             raise g.GenerationError(f"aspect_ratio must be one of {g.IMAGE_ASPECTS}")
