@@ -8,6 +8,7 @@ class Config:
     port: int
     token: str
     gemini_api_key: str
+    comfy_url: str
     workspace_root: str
     workspace_display_root: str
     results_root: str
@@ -23,6 +24,7 @@ def load_config() -> Config:
         port=int(os.environ.get("FORGE_PORT", "5125")),
         token=os.environ.get("FORGE_TOKEN", ""),
         gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
+        comfy_url=os.environ.get("FORGE_COMFY_URL", "").rstrip("/"),
         workspace_root=os.environ.get("FORGE_WORKSPACE_ROOT", "/workspace"),
         workspace_display_root=os.environ.get("FORGE_WORKSPACE_DISPLAY_ROOT", "C:\\Workspace"),
         results_root=os.environ.get("FORGE_RESULTS_ROOT", "/results"),

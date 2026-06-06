@@ -1,6 +1,7 @@
 """Google generativelanguage client — direct port of main.js generation logic."""
 import asyncio
 import base64
+import random
 import time
 
 import httpx
@@ -211,3 +212,111 @@ async def download_veo_video(client, sample: dict, api_key: str) -> bytes:
         except httpx.HTTPError as e:
             last_err = GenerationError(str(e))
     raise last_err or GenerationError("Veo MP4 download failed")
+
+
+# ---- Local diffusion via ComfyUI (uncensored; runs on the 4090 box over the LAN) ----
+# Workflows below are validated against the live ComfyUI (gemini-flash/Imagen still available
+# as the cloud fallback when the box is unreachable). Each returns raw PNG bytes — same
+# contract as call_imagen / call_gemini_image.
+
+LOCAL_MODELS = {
+    # alias -> (checkpoint filename, family)
+    "pony": ("ponyDiffusionV6XL.safetensors", "sdxl"),   # fast, maximally uncensored
+    "flux": ("flux1-dev-fp8.safetensors", "flux"),        # best quality/coherence
+}
+# Pony responds to score tags; we prepend/append sensible defaults so callers needn't know them.
+PONY_POS_PREFIX = "score_9, score_8_up, score_7_up, "
+PONY_NEG_DEFAULT = ("score_6, score_5, score_4, worst quality, low quality, blurry, "
+                    "jpeg artifacts, text, watermark, signature, deformed, extra limbs")
+
+
+def _sdxl_workflow(ckpt, pos, neg, width, height, steps, cfg, seed):
+    return {
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
+        "10": {"class_type": "VAELoader", "inputs": {"vae_name": "sdxl_vae.safetensors"}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": pos, "clip": ["4", 1]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": neg, "clip": ["4", 1]}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "3": {"class_type": "KSampler", "inputs": {
+            "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": "dpmpp_2m_sde",
+            "scheduler": "karras", "denoise": 1.0,
+            "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["5", 0]}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["10", 0]}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "forge", "images": ["8", 0]}},
+    }
+
+
+def _flux_workflow(ckpt, pos, width, height, steps, seed, guidance=3.5):
+    return {
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": pos, "clip": ["4", 1]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["4", 1]}},
+        "12": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["6", 0], "guidance": guidance}},
+        "5": {"class_type": "EmptySD3LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "3": {"class_type": "KSampler", "inputs": {
+            "seed": seed, "steps": steps, "cfg": 1.0, "sampler_name": "euler",
+            "scheduler": "simple", "denoise": 1.0,
+            "model": ["4", 0], "positive": ["12", 0], "negative": ["7", 0], "latent_image": ["5", 0]}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "forge", "images": ["8", 0]}},
+    }
+
+
+async def comfy_reachable(client, comfy_url, timeout=4.0) -> bool:
+    try:
+        r = await client.get(f"{comfy_url.rstrip('/')}/system_stats", timeout=timeout)
+        return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt=None,
+                     width=832, height=1216, steps=None, cfg=None, seed=None,
+                     guidance=3.5, poll_seconds=240) -> list:
+    """Generate one image on the local ComfyUI box. Returns [png_bytes]. Raises GenerationError
+    (so the tool can fall back to cloud) on any failure."""
+    if model not in LOCAL_MODELS:
+        raise GenerationError(f"Unknown local model '{model}'. Use one of: {', '.join(LOCAL_MODELS)}")
+    ckpt, family = LOCAL_MODELS[model]
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    base = comfy_url.rstrip("/")
+
+    if family == "sdxl":
+        pos = prompt if prompt.lower().startswith("score_") else PONY_POS_PREFIX + prompt
+        wf = _sdxl_workflow(ckpt, pos, negative_prompt or PONY_NEG_DEFAULT,
+                            width, height, steps or 28, cfg or 6.5, seed)
+    else:  # flux
+        wf = _flux_workflow(ckpt, prompt, width, height, steps or 20, seed, guidance)
+
+    q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": wf, "client_id": "forge"})
+    pid = q.get("prompt_id")
+    if not pid:
+        raise GenerationError(f"ComfyUI rejected the workflow: {str(q)[:400]}")
+
+    out = None
+    for _ in range(poll_seconds):
+        await asyncio.sleep(1.0)
+        try:
+            rec = (await client.get(f"{base}/history/{pid}")).json().get(pid)
+        except (httpx.HTTPError, ValueError):
+            continue
+        if not rec:
+            continue
+        for node in (rec.get("outputs") or {}).values():
+            if node.get("images"):
+                out = node["images"][0]
+                break
+        if out:
+            break
+        st = rec.get("status") or {}
+        if st.get("status_str") == "error":
+            raise GenerationError(f"ComfyUI generation error: {str(st.get('messages') or st)[:400]}")
+    if not out:
+        raise GenerationError("ComfyUI generation timed out")
+
+    r = await client.get(f"{base}/view", params={
+        "filename": out["filename"], "subfolder": out.get("subfolder", ""), "type": out.get("type", "output")})
+    if r.status_code != 200 or not r.content:
+        raise GenerationError(f"ComfyUI image fetch failed: HTTP {r.status_code}")
+    return [r.content]

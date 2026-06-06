@@ -4,6 +4,12 @@ import asyncio
 from forge_mcp import generation as g
 from forge_mcp import storage
 
+# Aspect ratio -> (width, height) at SDXL/Flux-friendly resolutions for local generation.
+LOCAL_AR = {
+    "1:1": (1024, 1024), "3:4": (896, 1152), "4:3": (1152, 896),
+    "9:16": (768, 1344), "16:9": (1344, 768),
+}
+
 
 def register(mcp, ctx):
     cfg, jobs = ctx.cfg, ctx.jobs
@@ -50,6 +56,52 @@ def register(mcp, ctx):
             results.append(await storage.save_result(img, project=project, subpath=subpath,
                                                      filename=name, ext="png", cfg=cfg))
         return {"count": len(results), "images": results}
+
+    @mcp.tool()
+    async def generate_local(prompt: str, project: str, model: str = "pony",
+                             aspect_ratio: str = "3:4", steps: int | None = None,
+                             cfg_scale: float | None = None, negative_prompt: str | None = None,
+                             seed: int | None = None, fallback: bool = True,
+                             subpath: str | None = None, filename: str | None = None) -> dict:
+        """Generate an image LOCALLY on the GPU box via ComfyUI — FULLY UNCENSORED (dark/gore/adult
+        OK; no cloud content filter). Saves into the project's workspace folder.
+          model: 'pony' (fast SDXL ~5-8s, maximally uncensored) | 'flux' (best quality/coherence ~15-20s).
+          aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9.
+        Pony score-tags + a sane negative prompt are applied automatically (override via negative_prompt).
+        If the GPU box is unreachable/busy and fallback=True, falls back to cloud Imagen 4 (filtered)."""
+        w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
+        engine = f"comfy:{model}"
+        images, reason = None, None
+        if cfg.comfy_url:
+            try:
+                images = await g.call_comfy(ctx.http, cfg.comfy_url, prompt, model=model,
+                                            negative_prompt=negative_prompt, width=w, height=h,
+                                            steps=steps, cfg=cfg_scale, seed=seed)
+            except g.GenerationError as e:
+                reason = str(e)
+        else:
+            reason = "FORGE_COMFY_URL not configured"
+        if images is None:
+            if not fallback:
+                raise g.GenerationError(f"Local generation failed: {reason}")
+            _require_key()
+            engine = "imagen-4 (fallback)"
+            ar = aspect_ratio if aspect_ratio in g.IMAGE_ASPECTS else "1:1"
+            images = await g.call_imagen(ctx.http, cfg.gemini_api_key,
+                                         g.resolve_image_model("imagen-4"), prompt,
+                                         sample_count=1, aspect_ratio=ar)
+            if not images:
+                raise g.GenerationError("Local generation failed and Imagen fallback returned nothing")
+        base = storage.safe_filename(filename or prompt[:48])
+        results = []
+        for i, img in enumerate(images, 1):
+            name = base if len(images) == 1 else f"{base}-{i}"
+            results.append(await storage.save_result(img, project=project, subpath=subpath,
+                                                     filename=name, ext="png", cfg=cfg))
+        out = {"count": len(results), "images": results, "engine": engine}
+        if engine.endswith("(fallback)"):
+            out["fallback_reason"] = reason
+        return out
 
     @mcp.tool()
     async def edit_image(prompt: str, reference_images: list[str], project: str,
