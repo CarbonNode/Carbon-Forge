@@ -72,15 +72,26 @@ def register(mcp, ctx):
         w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
         engine = f"comfy:{model}"
         images, reason = None, None
-        if cfg.comfy_url:
-            try:
-                images = await g.call_comfy(ctx.http, cfg.comfy_url, prompt, model=model,
-                                            negative_prompt=negative_prompt, width=w, height=h,
-                                            steps=steps, cfg=cfg_scale, seed=seed)
-            except g.GenerationError as e:
-                reason = str(e)
+        # Routing policy: laybackrig's ComfyUI first; overflow to maingamingrig when laybackrig
+        # is busy (a gen already running) — and never a box being gamed on (presence-gated).
+        backends = [
+            {"url": cfg.comfy_url, "presence_url": "", "label": "laybackrig"},
+            {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+        ]
+        if any(b["url"] for b in backends):
+            chosen_url, sel = await g.select_comfy(ctx.http, backends)
+            if chosen_url:
+                engine = f"comfy:{model}@{sel}"
+                try:
+                    images = await g.call_comfy(ctx.http, chosen_url, prompt, model=model,
+                                                negative_prompt=negative_prompt, width=w, height=h,
+                                                steps=steps, cfg=cfg_scale, seed=seed)
+                except g.GenerationError as e:
+                    reason = str(e)
+            else:
+                reason = sel
         else:
-            reason = "FORGE_COMFY_URL not configured"
+            reason = "no ComfyUI backend configured"
         if images is None:
             if not fallback:
                 raise g.GenerationError(f"Local generation failed: {reason}")

@@ -270,6 +270,53 @@ async def comfy_reachable(client, comfy_url, timeout=4.0) -> bool:
         return False
 
 
+async def comfy_busy(client, comfy_url, timeout=4.0) -> bool:
+    """True if ComfyUI already has a job running/queued — so a new gen should overflow to
+    another box instead of waiting behind it. Unknown (probe fails) → False (don't block)."""
+    try:
+        d = (await client.get(f"{comfy_url.rstrip('/')}/queue", timeout=timeout)).json()
+        return bool(d.get("queue_running") or d.get("queue_pending"))
+    except (httpx.HTTPError, ValueError):
+        return False
+
+
+async def box_gaming(client, presence_url, timeout=3.0) -> bool:
+    """True if the box hosting this ComfyUI is being used by a human (gaming/desktop) per its
+    gpu-presence agent — so we must NOT send it work. Fail-OPEN: if presence is unset or the
+    probe fails, return False (the box's own local guard still protects it)."""
+    if not presence_url:
+        return False
+    try:
+        d = (await client.get(presence_url.rstrip("/"), timeout=timeout)).json()
+        return bool(d.get("present"))
+    except (httpx.HTTPError, ValueError):
+        return False
+
+
+async def select_comfy(client, backends) -> tuple[str | None, str]:
+    """Pick a ComfyUI backend for a new local gen, honoring the routing policy:
+    primary first, overflow only when primary is busy; never a box being gamed on.
+    `backends` = ordered list of {url, presence_url, label} (highest priority first).
+    Returns (url, label) or (None, reason). Prefers a NON-busy reachable box (that's the
+    overflow-when-primary-busy behavior); if all reachable boxes are busy, uses the
+    highest-priority reachable one and lets ComfyUI queue it (still better than cloud)."""
+    reachable = []
+    for b in backends:
+        if not b.get("url"):
+            continue
+        if not await comfy_reachable(client, b["url"]):
+            continue
+        if await box_gaming(client, b.get("presence_url", "")):
+            continue  # skip a box someone is gaming on
+        reachable.append(b)
+    for b in reachable:
+        if not await comfy_busy(client, b["url"]):
+            return b["url"], b["label"]
+    if reachable:
+        return reachable[0]["url"], reachable[0]["label"]
+    return None, "no reachable ComfyUI backend (all unreachable or gaming)"
+
+
 async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt=None,
                      width=832, height=1216, steps=None, cfg=None, seed=None,
                      guidance=3.5, poll_seconds=240) -> list:
