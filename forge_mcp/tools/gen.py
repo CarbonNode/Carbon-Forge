@@ -193,6 +193,40 @@ def register(mcp, ctx):
         res["engine"] = f"esrgan-4x@{sel}"
         return {"image": res, "engine": res["engine"]}
 
+    @mcp.tool()
+    async def generate_with_reference(prompt: str, reference_image: str, project: str,
+                                      mode: str = "character", weight: float = 0.8,
+                                      aspect_ratio: str = "3:4", negative_prompt: str | None = None,
+                                      steps: int | None = None, seed: int | None = None,
+                                      subpath: str | None = None, filename: str | None = None) -> dict:
+        """Generate an image that KEEPS the character / face / style of a reference image (IPAdapter) —
+        LOCAL on the GPU pool, uncensored. Use it for the SAME character across scenes/poses, a
+        consistent mascot, or transferring an art style. reference_image: an https URL or a
+        '<Project>/<path>' workspace path. SDXL/pony only.
+          mode: 'character' (subject + style, general) | 'face' (portrait, face-locked) |
+                'style' (art style only, not the subject).
+          weight: 0.4-1.2 — how strongly to follow the reference (default 0.8; lower = more prompt freedom).
+          aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9."""
+        src = await storage.resolve_input(reference_image, cfg=cfg, kind="image")
+        w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
+        preset = {"character": "PLUS (high strength)", "face": "PLUS FACE (portraits)",
+                  "style": "PLUS (high strength)"}.get(mode, "PLUS (high strength)")
+        weight_type = "style transfer" if mode == "style" else "linear"
+        backends = [
+            {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+            {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+        ]
+        chosen, sel = await g.select_comfy(ctx.http, backends)
+        if not chosen:
+            raise g.GenerationError(f"No GPU backend available for reference gen ({sel})")
+        imgs = await g.call_comfy_ref(ctx.http, chosen, src.data, prompt, model="pony", preset=preset,
+                                      weight=weight, weight_type=weight_type, negative_prompt=negative_prompt,
+                                      width=w, height=h, steps=steps, seed=seed)
+        res = await storage.save_result(imgs[0], project=project, subpath=subpath,
+                                        filename=storage.safe_filename(filename or prompt[:40]), ext="png", cfg=cfg)
+        res["engine"] = f"ipadapter-{mode}@{sel}"
+        return {"image": res, "engine": res["engine"], "mode": mode}
+
     async def _poll_and_finish(job_id: str, op: str):
         job = jobs.get(job_id)
         sample = await g.poll_veo(ctx.http, cfg.gemini_api_key, op,

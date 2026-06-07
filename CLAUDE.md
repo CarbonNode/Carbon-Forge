@@ -23,7 +23,7 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
   jobs.py         # persistent Veo job registry (/results/jobs.json), restart resume
   video.py        # ffmpeg trim/frames/convert
   engine.py       # async bridge to backend.processing (CPU semaphore, model-load lock)
-  tools/          # MCP tool definitions: proc, gen, vid, meta (23 tools — incl. local Wan T2V/I2V, ESRGAN upscale, batch/montage, generate_clip pipeline)
+  tools/          # MCP tool definitions: proc, gen, vid, meta (24 tools — incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, batch/montage, generate_clip pipeline)
 tests/            # pytest (26 tests) + manual_* live-smoke clients
 Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 ```

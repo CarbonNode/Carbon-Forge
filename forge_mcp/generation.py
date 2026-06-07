@@ -462,6 +462,49 @@ async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt
     return [r.content]
 
 
+def _sdxl_ipadapter_workflow(ckpt, pos, neg, width, height, steps, cfg, seed, ref_name, preset, weight, weight_type):
+    """SDXL graph with IPAdapter injected between the checkpoint MODEL and the KSampler, so the gen
+    carries the character/face/style of the reference image. Reuses the plain SDXL graph + repoints
+    node 3's model input through IPAdapterUnifiedLoader → IPAdapterAdvanced."""
+    wf = _sdxl_workflow(ckpt, pos, neg, width, height, steps, cfg, seed)
+    wf["20"] = {"class_type": "LoadImage", "inputs": {"image": ref_name}}
+    wf["21"] = {"class_type": "IPAdapterUnifiedLoader", "inputs": {"model": ["4", 0], "preset": preset}}
+    wf["22"] = {"class_type": "IPAdapterAdvanced", "inputs": {
+        "model": ["21", 0], "ipadapter": ["21", 1], "image": ["20", 0], "weight": weight,
+        "weight_type": weight_type, "combine_embeds": "concat", "start_at": 0.0, "end_at": 1.0,
+        "embeds_scaling": "V only"}}
+    wf["3"]["inputs"]["model"] = ["22", 0]
+    return wf
+
+
+async def call_comfy_ref(client, comfy_url, ref_bytes, prompt, *, model="pony",
+                         preset="PLUS (high strength)", weight=0.8, weight_type="linear",
+                         negative_prompt=None, width=832, height=1216, steps=None, cfg=None,
+                         seed=None, poll_seconds=240, free_after=True) -> list:
+    """Generate an image conditioned on a REFERENCE image via IPAdapter (character/face/style
+    consistency). SDXL/pony family only. Returns [png_bytes]. Raises GenerationError on failure."""
+    if model not in LOCAL_MODELS:
+        raise GenerationError(f"Unknown local model '{model}'. Use one of: {', '.join(LOCAL_MODELS)}")
+    ckpt, family = LOCAL_MODELS[model]
+    if family != "sdxl":
+        raise GenerationError("Reference (IPAdapter) generation supports the SDXL family (pony) only")
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    base = comfy_url.rstrip("/")
+    pos = prompt if prompt.lower().startswith("score_") else PONY_POS_PREFIX + prompt
+    name = await comfy_upload_image(client, base, ref_bytes, "forge_ref.png")
+    wf = _sdxl_ipadapter_workflow(ckpt, pos, negative_prompt or PONY_NEG_DEFAULT, width, height,
+                                  steps or 28, cfg or 6.5, seed, name, preset, weight, weight_type)
+    q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": wf, "client_id": "forge"})
+    pid = q.get("prompt_id")
+    if not pid:
+        raise GenerationError(f"ComfyUI rejected the IPAdapter workflow: {str(q)[:400]}")
+    data = await _comfy_poll_image(client, base, pid, poll_seconds, "reference-gen")
+    if free_after:
+        await comfy_free(client, base)
+    return [data]
+
+
 async def comfy_upload_image(client, comfy_url, data, filename="forge_input.png") -> str:
     """Upload image bytes into a ComfyUI box's input dir; returns the server-side name for LoadImage."""
     r = await client.post(f"{comfy_url.rstrip('/')}/upload/image",
