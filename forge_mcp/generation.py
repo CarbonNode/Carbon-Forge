@@ -279,6 +279,7 @@ LOCAL_VIDEO_MODELS = {
         "high": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
         "low": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
         "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "clip_vision": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
         "vae": "wan_2.1_vae.safetensors",
         "shift": 8.0, "cfg": 3.5, "steps": 20, "fps": 16,
     },
@@ -569,17 +570,32 @@ async def call_comfy_video(client, comfy_url, prompt, *, model="wan", negative_p
 
 
 def _wan_i2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps, image_name):
-    """Wan 2.2 two-expert I2V graph — like T2V but the latent is seeded from a start image
-    (LoadImage → Wan22ImageToVideoLatent.start_image), so the clip animates that still."""
-    wf = _wan_t2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps)
-    wf["15"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
-    # Resize the start frame to the exact target dims, else Wan22ImageToVideoLatent encodes it at
-    # the image's own resolution and the latent dims mismatch the empty (length) latent it builds.
-    wf["16"] = {"class_type": "ImageScale", "inputs": {
-        "image": ["15", 0], "upscale_method": "lanczos", "width": width, "height": height, "crop": "center"}}
-    wf["9"]["inputs"]["start_image"] = ["16", 0]
-    wf["14"]["inputs"]["filename_prefix"] = "forge_i2v"
-    return wf
+    """Wan 2.2 two-expert I2V-A14B graph. Unlike the 5B Wan22ImageToVideoLatent path, the A14B I2V
+    models condition on a CLIP-Vision encode of the start frame: CLIPVisionEncode → WanImageToVideo,
+    which rewrites positive/negative conditioning AND builds the (wan_2.1 VAE, /8) latent at the right
+    scale — so the KSamplers take their conditioning + latent from node 9's three outputs."""
+    half = max(1, steps // 2)
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": spec["high"], "weight_dtype": "default"}},
+        "2": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": spec["shift"]}},
+        "3": {"class_type": "UNETLoader", "inputs": {"unet_name": spec["low"], "weight_dtype": "default"}},
+        "4": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["3", 0], "shift": spec["shift"]}},
+        "5": {"class_type": "CLIPLoader", "inputs": {"clip_name": spec["clip"], "type": "wan"}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": pos, "clip": ["5", 0]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": neg, "clip": ["5", 0]}},
+        "8": {"class_type": "VAELoader", "inputs": {"vae_name": spec["vae"]}},
+        "15": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "17": {"class_type": "CLIPVisionLoader", "inputs": {"clip_name": spec["clip_vision"]}},
+        "18": {"class_type": "CLIPVisionEncode", "inputs": {"clip_vision": ["17", 0], "image": ["15", 0], "crop": "center"}},
+        "9": {"class_type": "WanImageToVideo", "inputs": {
+            "positive": ["6", 0], "negative": ["7", 0], "vae": ["8", 0], "clip_vision_output": ["18", 0],
+            "start_image": ["15", 0], "width": width, "height": height, "length": length, "batch_size": 1}},
+        "10": {"class_type": "KSamplerAdvanced", "inputs": {"model": ["2", 0], "add_noise": "enable", "noise_seed": seed, "steps": steps, "cfg": spec["cfg"], "sampler_name": "euler", "scheduler": "simple", "positive": ["9", 0], "negative": ["9", 1], "latent_image": ["9", 2], "start_at_step": 0, "end_at_step": half, "return_with_leftover_noise": "enable"}},
+        "11": {"class_type": "KSamplerAdvanced", "inputs": {"model": ["4", 0], "add_noise": "disable", "noise_seed": seed, "steps": steps, "cfg": spec["cfg"], "sampler_name": "euler", "scheduler": "simple", "positive": ["9", 0], "negative": ["9", 1], "latent_image": ["10", 0], "start_at_step": half, "end_at_step": steps, "return_with_leftover_noise": "disable"}},
+        "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["8", 0]}},
+        "13": {"class_type": "CreateVideo", "inputs": {"images": ["12", 0], "fps": float(fps)}},
+        "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": "forge_i2v", "format": "mp4", "codec": "h264"}},
+    }
 
 
 async def call_comfy_i2v(client, comfy_url, image_bytes, prompt, *, negative_prompt=None,
