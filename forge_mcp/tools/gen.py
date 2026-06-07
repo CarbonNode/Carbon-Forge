@@ -114,7 +114,15 @@ def register(mcp, ctx):
             {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
         ]
         if any(b["url"] for b in backends):
-            chosen_url, sel = await g.select_comfy(ctx.http, backends)
+            # Route only to a box that actually has this checkpoint (auto-discovered); skip the gate
+            # for the always-present defaults to save a probe.
+            req_ckpt = None
+            if model not in ("pony", "flux"):
+                try:
+                    req_ckpt = [g.resolve_model(model)[0]]
+                except g.GenerationError:
+                    req_ckpt = None
+            chosen_url, sel = await g.select_comfy(ctx.http, backends, require_checkpoints=req_ckpt)
             if chosen_url:
                 engine = f"comfy:{model}@{sel}"
                 try:
@@ -326,12 +334,18 @@ def register(mcp, ctx):
         prompt = ICON_TEMPLATE.format(subject=subject, style=style)
         raster = None
         engine_str = None
-        if model in ("flux", "pony"):
+        if model != "imagen":  # any local checkpoint (alias or installed filename); else cloud
             backends = [
                 {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
                 {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
             ]
-            chosen, sel = await g.select_comfy(ctx.http, backends)
+            req_ckpt = None
+            if model not in ("pony", "flux"):
+                try:
+                    req_ckpt = [g.resolve_model(model)[0]]
+                except g.GenerationError:
+                    req_ckpt = None
+            chosen, sel = await g.select_comfy(ctx.http, backends, require_checkpoints=req_ckpt)
             if chosen:
                 try:
                     raster = (await g.call_comfy(ctx.http, chosen, prompt, model=model,

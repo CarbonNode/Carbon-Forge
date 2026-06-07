@@ -344,10 +344,32 @@ async def call_chatterbox(client, url, text, *, exaggeration=0.5, cfg_weight=0.5
 # contract as call_imagen / call_gemini_image.
 
 LOCAL_MODELS = {
-    # alias -> (checkpoint filename, family)
+    # Curated aliases -> (checkpoint filename, family). Friendly names + correct family; but `model`
+    # may ALSO be any checkpoint filename installed in ComfyUI (auto-discovered) — see resolve_model.
     "pony": ("ponyDiffusionV6XL.safetensors", "sdxl"),   # fast, maximally uncensored
     "flux": ("flux1-dev-fp8.safetensors", "flux"),        # best quality/coherence
+    "illustrious": ("Illustrious-XL-v0.1.safetensors", "sdxl"),  # anime/illustration, strong characters
+    "juggernaut": ("Juggernaut-XL-v9.safetensors", "sdxl"),      # photoreal (people, products)
 }
+
+
+def model_family(name: str) -> str:
+    """Heuristic family for a raw checkpoint filename (flux vs sdxl). Used when a caller passes a
+    checkpoint that isn't a curated alias, so any installed model works without a code change."""
+    return "flux" if "flux" in name.lower() else "sdxl"
+
+
+def resolve_model(model: str) -> tuple[str, str]:
+    """(checkpoint_filename, family) for either a curated alias OR a raw installed checkpoint name.
+    A bare alias (no extension) that isn't curated is rejected; pass the actual .safetensors filename
+    (see list_models for what each box has) to use a non-aliased model."""
+    if model in LOCAL_MODELS:
+        return LOCAL_MODELS[model]
+    if model.endswith((".safetensors", ".ckpt", ".sft")):
+        return model, model_family(model)
+    raise GenerationError(
+        f"Unknown model '{model}'. Use a curated alias ({', '.join(LOCAL_MODELS)}) or an installed "
+        f"checkpoint filename (e.g. Foo_v1.safetensors — see list_models).")
 # Pony responds to score tags; we prepend/append sensible defaults so callers needn't know them.
 PONY_POS_PREFIX = "score_9, score_8_up, score_7_up, "
 PONY_NEG_DEFAULT = ("score_6, score_5, score_4, worst quality, low quality, blurry, "
@@ -448,6 +470,23 @@ async def comfy_has_models(client, comfy_url, unet_names, timeout=5.0) -> bool:
         return False
 
 
+async def comfy_checkpoints(client, comfy_url, timeout=5.0) -> list:
+    """Live list of checkpoint files installed on a box's ComfyUI (CheckpointLoaderSimple enum).
+    This is what makes the model registry self-updating: drop a .safetensors in models/checkpoints,
+    sync it, and it shows up here — no code change."""
+    try:
+        d = (await client.get(f"{comfy_url.rstrip('/')}/object_info/CheckpointLoaderSimple", timeout=timeout)).json()
+        opts = d.get("CheckpointLoaderSimple", {}).get("input", {}).get("required", {}).get("ckpt_name", [[]])[0]
+        return list(opts) if isinstance(opts, list) else []
+    except (httpx.HTTPError, ValueError, KeyError):
+        return []
+
+
+async def comfy_has_checkpoints(client, comfy_url, ckpt_names, timeout=5.0) -> bool:
+    have = set(await comfy_checkpoints(client, comfy_url, timeout))
+    return all(n in have for n in ckpt_names)
+
+
 async def comfy_free(client, comfy_url, timeout=8.0) -> None:
     """Unload models + free VRAM on a box's ComfyUI after a gen, so chim/games get the card back
     immediately (ComfyUI keeps the last model resident otherwise). Best-effort — never raises."""
@@ -498,14 +537,14 @@ async def box_gaming(client, presence_url, timeout=3.0) -> bool:
         return False
 
 
-async def select_comfy(client, backends, require_unets=None) -> tuple[str | None, str]:
+async def select_comfy(client, backends, require_unets=None, require_checkpoints=None) -> tuple[str | None, str]:
     """Pick a ComfyUI backend for a new local gen, honoring the routing policy:
     primary first, overflow only when primary is busy; never a box being gamed on.
     `backends` = ordered list of {url, presence_url, label} (highest priority first).
-    `require_unets` = optional list of diffusion-model filenames the box must have (capability
-    gate — e.g. the Wan video models, so video only routes to boxes that can run it; a box
-    auto-qualifies once its models are synced). Returns (url, label) or (None, reason)."""
-    elig = await eligible_comfy_backends(client, backends, require_unets)
+    `require_unets` / `require_checkpoints` = optional model filenames the box must have (capability
+    gate — video unets, or a specific checkpoint — so a job only routes to a box that can run it; a
+    box auto-qualifies once its models are synced). Returns (url, label) or (None, reason)."""
+    elig = await eligible_comfy_backends(client, backends, require_unets, require_checkpoints)
     for b in elig:
         if not b["busy"]:
             return b["url"], b["label"]
@@ -514,7 +553,7 @@ async def select_comfy(client, backends, require_unets=None) -> tuple[str | None
     return None, "no reachable ComfyUI backend (all unreachable, gaming, or lacking the model)"
 
 
-async def eligible_comfy_backends(client, backends, require_unets=None):
+async def eligible_comfy_backends(client, backends, require_unets=None, require_checkpoints=None):
     """All usable ComfyUI backends in priority order (reachable, not gamed-on/chim-busy, and
     having the required models), each annotated with `busy` (a job already running). Shared by
     select_comfy (picks the best one) and the batch fan-out (spreads work across several)."""
@@ -528,6 +567,8 @@ async def eligible_comfy_backends(client, backends, require_unets=None):
             continue
         if require_unets and not await comfy_has_models(client, b["url"], require_unets):
             continue
+        if require_checkpoints and not await comfy_has_checkpoints(client, b["url"], require_checkpoints):
+            continue
         out.append({**b, "busy": await comfy_busy(client, b["url"])})
     return out
 
@@ -537,9 +578,7 @@ async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt
                      guidance=3.5, poll_seconds=240, free_after=True) -> list:
     """Generate one image on the local ComfyUI box. Returns [png_bytes]. Raises GenerationError
     (so the tool can fall back to cloud) on any failure."""
-    if model not in LOCAL_MODELS:
-        raise GenerationError(f"Unknown local model '{model}'. Use one of: {', '.join(LOCAL_MODELS)}")
-    ckpt, family = LOCAL_MODELS[model]
+    ckpt, family = resolve_model(model)
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
     base = comfy_url.rstrip("/")
@@ -619,11 +658,9 @@ async def call_comfy_ref(client, comfy_url, ref_images, prompt, *, model="pony",
     """Generate an image conditioned on REFERENCE image(s) via IPAdapter (character/face/style
     consistency). ref_images: bytes or a list of bytes (multiple angles → averaged likeness).
     SDXL/pony family only. Returns [png_bytes]. Raises GenerationError on failure."""
-    if model not in LOCAL_MODELS:
-        raise GenerationError(f"Unknown local model '{model}'. Use one of: {', '.join(LOCAL_MODELS)}")
-    ckpt, family = LOCAL_MODELS[model]
+    ckpt, family = resolve_model(model)
     if family != "sdxl":
-        raise GenerationError("Reference (IPAdapter) generation supports the SDXL family (pony) only")
+        raise GenerationError("Reference (IPAdapter) generation supports the SDXL family (pony/illustrious/juggernaut) only")
     if isinstance(ref_images, (bytes, bytearray)):
         ref_images = [ref_images]
     if not ref_images:

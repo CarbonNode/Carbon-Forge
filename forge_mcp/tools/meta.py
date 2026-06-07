@@ -4,6 +4,7 @@ import shutil
 
 from backend.processing import AVAILABLE_MODELS
 from forge_mcp import engine
+from forge_mcp import generation as g
 from forge_mcp.generation import IMAGE_MODEL_ALIASES, VIDEO_MODEL_ALIASES
 
 
@@ -38,12 +39,29 @@ def register(mcp, ctx):
 
     @mcp.tool()
     async def list_models() -> dict:
-        """Available background-removal models and generation model aliases."""
+        """Generation models. `local_aliases` are curated names; `installed_checkpoints` is the LIVE
+        list of checkpoints actually on each GPU box (auto-discovered — drop a .safetensors in
+        ComfyUI's models/checkpoints + sync and it appears here, usable by filename, no code change).
+        The `model` param of generate_local / generate_icon / generate_clip / generate_with_reference
+        accepts a local alias OR any installed checkpoint filename. Plus bg-removal + cloud aliases."""
+        backends = [
+            {"url": cfg.comfy_url, "label": "laybackrig"},
+            {"url": cfg.comfy_overflow_url, "label": "maingamingrig"},
+        ]
+        installed = {}
+        for b in backends:
+            if b["url"]:
+                cks = await g.comfy_checkpoints(ctx.http, b["url"])
+                if cks:
+                    installed[b["label"]] = cks
         return {
+            "local_aliases": {a: {"checkpoint": c, "family": f} for a, (c, f) in g.LOCAL_MODELS.items()},
+            "installed_checkpoints": installed,
+            "local_video": list(g.LOCAL_VIDEO_MODELS.keys()),
             "background_removal": AVAILABLE_MODELS,
-            "image_generation": list(IMAGE_MODEL_ALIASES.keys()),
+            "image_generation_cloud": list(IMAGE_MODEL_ALIASES.keys()),
             "image_edit": ["gemini-2.5-flash-image (default — used by edit_image)"],
-            "video_generation": list(VIDEO_MODEL_ALIASES.keys()),
+            "video_generation_cloud": list(VIDEO_MODEL_ALIASES.keys()),
         }
 
     @mcp.tool()
