@@ -115,6 +115,40 @@ def register(mcp, ctx):
         return out
 
     @mcp.tool()
+    async def generate_image_batch(prompt: str, project: str, count: int = 4, model: str = "pony",
+                                   aspect_ratio: str = "3:4", negative_prompt: str | None = None,
+                                   subpath: str | None = None, filename: str | None = None) -> dict:
+        """Generate COUNT variations of a prompt IN PARALLEL across the local GPU pool (laybackrig +
+        maingamingrig), then return them all — a fast 'contact sheet' that uses every free box at
+        once. Variations are spread round-robin across eligible boxes (skipping any being gamed on /
+        running chim); each gets a fresh seed. model: pony | flux. aspect_ratio: 1:1,3:4,4:3,9:16,16:9."""
+        count = max(1, min(count, 12))
+        w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
+        backends = [
+            {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+            {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+        ]
+        elig = await g.eligible_comfy_backends(ctx.http, backends)
+        if not elig:
+            raise g.GenerationError("No local GPU backend available for batch (all busy/gaming/chim)")
+        base = storage.safe_filename(filename or prompt[:40])
+
+        async def _one(i, backend):
+            imgs = await g.call_comfy(ctx.http, backend["url"], prompt, model=model,
+                                      negative_prompt=negative_prompt, width=w, height=h)  # fresh seed each call
+            res = await storage.save_result(imgs[0], project=project, subpath=subpath,
+                                            filename=f"{base}-{i + 1}", ext="png", cfg=cfg)
+            res["engine"] = f"comfy:{model}@{backend['label']}"
+            return res
+
+        settled = await asyncio.gather(*[_one(i, elig[i % len(elig)]) for i in range(count)],
+                                       return_exceptions=True)
+        images = [r for r in settled if not isinstance(r, Exception)]
+        errors = [str(r) for r in settled if isinstance(r, Exception)]
+        return {"count": len(images), "requested": count, "images": images,
+                "spread_across": [b["label"] for b in elig], "errors": errors or None}
+
+    @mcp.tool()
     async def edit_image(prompt: str, reference_images: list[str], project: str,
                          subpath: str | None = None, filename: str | None = None) -> dict:
         """Edit/compose images with Gemini: give 1-6 reference images (https URLs or

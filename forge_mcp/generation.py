@@ -362,23 +362,31 @@ async def select_comfy(client, backends, require_unets=None) -> tuple[str | None
     `require_unets` = optional list of diffusion-model filenames the box must have (capability
     gate — e.g. the Wan video models, so video only routes to boxes that can run it; a box
     auto-qualifies once its models are synced). Returns (url, label) or (None, reason)."""
-    reachable = []
+    elig = await eligible_comfy_backends(client, backends, require_unets)
+    for b in elig:
+        if not b["busy"]:
+            return b["url"], b["label"]
+    if elig:
+        return elig[0]["url"], elig[0]["label"]
+    return None, "no reachable ComfyUI backend (all unreachable, gaming, or lacking the model)"
+
+
+async def eligible_comfy_backends(client, backends, require_unets=None):
+    """All usable ComfyUI backends in priority order (reachable, not gamed-on/chim-busy, and
+    having the required models), each annotated with `busy` (a job already running). Shared by
+    select_comfy (picks the best one) and the batch fan-out (spreads work across several)."""
+    out = []
     for b in backends:
         if not b.get("url"):
             continue
         if not await comfy_reachable(client, b["url"]):
             continue
         if await box_gaming(client, b.get("presence_url", "")):
-            continue  # skip a box someone is gaming on
+            continue
         if require_unets and not await comfy_has_models(client, b["url"], require_unets):
-            continue  # box lacks the required model (e.g. no Wan video models yet)
-        reachable.append(b)
-    for b in reachable:
-        if not await comfy_busy(client, b["url"]):
-            return b["url"], b["label"]
-    if reachable:
-        return reachable[0]["url"], reachable[0]["label"]
-    return None, "no reachable ComfyUI backend (all unreachable or gaming)"
+            continue
+        out.append({**b, "busy": await comfy_busy(client, b["url"])})
+    return out
 
 
 async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt=None,
