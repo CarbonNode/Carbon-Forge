@@ -129,6 +129,47 @@ async def extract_frames(data: bytes, timestamps, fmt="png", in_ext="mp4") -> li
         src.cleanup()
 
 
+def build_concat_cmd(list_path, outp, *, reencode):
+    cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path]
+    if reencode:
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "20", "-pix_fmt", "yuv420p"]
+    else:
+        cmd += ["-c", "copy"]
+    return cmd + [outp]
+
+
+async def concat(segments, in_ext="mp4") -> bytes:
+    """Concatenate video segments (bytes) into one clip via the ffmpeg concat demuxer. Tries
+    stream-copy first (fast; segments share codec/res when from the same Wan workflow), falls
+    back to re-encode if that produces garbage. Used to stitch parallel multi-shot segments."""
+    if not segments:
+        raise VideoError("No segments to concat")
+    if len(segments) == 1:
+        return segments[0]
+    tmps = [_Tmp(f".{in_ext}", s) for s in segments]
+    listing = "\n".join(f"file '{t.path}'" for t in tmps)
+    lst = _Tmp(".txt", listing.encode())
+    dst = _Tmp(".mp4")
+    try:
+        out = b""
+        try:
+            await _run(build_concat_cmd(lst.path, dst.path, reencode=False))
+            out = dst.read()
+        except VideoError:
+            out = b""
+        if len(out) < 1024:  # stream-copy mismatch -> re-encode
+            await _run(build_concat_cmd(lst.path, dst.path, reencode=True))
+            out = dst.read()
+        if len(out) < 1024:
+            raise VideoError("Concat produced an empty file")
+        return out
+    finally:
+        for t in tmps:
+            t.cleanup()
+        lst.cleanup()
+        dst.cleanup()
+
+
 async def convert(data: bytes, fmt, *, crf=None, scale=None, in_ext="mp4") -> bytes:
     src, dst = _Tmp(f".{in_ext}", data), _Tmp(f".{fmt}")
     try:

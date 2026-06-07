@@ -3,6 +3,7 @@ import asyncio
 
 from forge_mcp import generation as g
 from forge_mcp import storage
+from forge_mcp import video
 
 # Aspect ratio -> (width, height) at SDXL/Flux-friendly resolutions for local generation.
 LOCAL_AR = {
@@ -256,9 +257,57 @@ def register(mcp, ctx):
         return {"job_id": job["id"], "status": "running",
                 "note": "Local video (Wan 2.2) takes a few minutes. Poll with job_status."}
 
+    async def _run_montage_job(job_id, shots, neg, w, h, length, steps, fps):
+        try:
+            spec = g.LOCAL_VIDEO_MODELS["wan"]
+            backends = [
+                {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+                {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+            ]
+            elig = await g.eligible_comfy_backends(ctx.http, backends, require_unets=[spec["high"], spec["low"]])
+            if not elig:
+                raise g.GenerationError("No local video backend available for montage (busy/gaming/chim or no Wan models)")
+            jobs.update(job_id, message=f"rendering {len(shots)} shots across {len(elig)} box(es)…")
+
+            async def _seg(i, shot):
+                b = elig[i % len(elig)]
+                return await g.call_comfy_video(ctx.http, b["url"], shot, model="wan", negative_prompt=neg,
+                                                width=w, height=h, length=length, steps=steps, fps=fps)
+            segs = await asyncio.gather(*[_seg(i, s) for i, s in enumerate(shots)])  # ordered → preserves shot order
+            jobs.update(job_id, message="stitching segments…")
+            final = await video.concat(list(segs))
+            job = jobs.get(job_id)
+            res = await storage.save_result(final, project=job["project"], subpath=job["subpath"],
+                                            filename=job["filename"] or "montage", ext="mp4", cfg=cfg)
+            jobs.update(job_id, status="done", message=f"complete ({len(shots)} shots across {len(elig)} box(es))", results=[res])
+        except Exception as e:
+            jobs.update(job_id, status="failed", error=str(e))
+
+    @mcp.tool()
+    async def generate_video_montage(shots: list[str], project: str, aspect_ratio: str = "16:9",
+                                     seconds_per_shot: float = 3.0, negative_prompt: str | None = None,
+                                     steps: int | None = None, subpath: str | None = None,
+                                     filename: str | None = None) -> dict:
+        """Make a MULTI-SHOT video: render each shot-prompt as a Wan 2.2 segment IN PARALLEL across the
+        GPU pool (laybackrig + maingamingrig), then ffmpeg-concat them into one clip — leverages every
+        free box at once, so a 4-shot clip on 2 boxes finishes in ~2 shots' time. Skips boxes being
+        gamed-on / running chim. shots: 1-8 prompts (in order). Takes minutes — returns a job_id; poll
+        job_status. aspect_ratio: 1:1,16:9,9:16,4:3,3:4; seconds_per_shot ~2-5."""
+        if not shots or len(shots) > 8:
+            raise g.GenerationError("Provide 1-8 shot prompts")
+        w, h = g.VIDEO_AR.get(aspect_ratio, (832, 480))
+        fps = g.LOCAL_VIDEO_MODELS["wan"]["fps"]
+        length = max(17, int(round(seconds_per_shot * fps / 4)) * 4 + 1)
+        storage.validate_project(project, cfg=cfg)
+        job = jobs.create(kind="montage", model="wan", prompt=" | ".join(shots)[:200],
+                          project=project, subpath=subpath, filename=filename)
+        asyncio.create_task(_run_montage_job(job["id"], shots, negative_prompt, w, h, length, steps, fps))
+        return {"job_id": job["id"], "status": "running",
+                "note": f"{len(shots)}-shot montage rendering in parallel across the pool. Poll job_status."}
+
     @mcp.tool()
     async def job_status(job_id: str) -> dict:
-        """Status of a generate_video / generate_video_local job: running (with progress), done (results), or failed."""
+        """Status of a generate_video / generate_video_local / generate_video_montage job: running, done, or failed."""
         job = jobs.get(job_id)
         if not job:
             raise g.GenerationError(f"No job '{job_id}'")
