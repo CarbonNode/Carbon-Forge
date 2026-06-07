@@ -333,15 +333,24 @@ async def comfy_busy(client, comfy_url, timeout=4.0) -> bool:
         return False
 
 
+# GPU util (from a box's :11435 status/presence endpoint) above this = something is generating
+# (e.g. chim's NPC dialogue on laybackrig) → treat the box as busy so Forge yields it.
+GAMING_UTIL_PCT = 50
+
+
 async def box_gaming(client, presence_url, timeout=3.0) -> bool:
-    """True if the box hosting this ComfyUI is being used by a human (gaming/desktop) per its
-    gpu-presence agent — so we must NOT send it work. Fail-OPEN: if presence is unset or the
-    probe fails, return False (the box's own local guard still protects it)."""
+    """True if the box hosting this ComfyUI is in use and must be yielded — either its presence
+    agent says a human is on it (`present`, e.g. gaming on maingamingrig) OR its GPU util is high
+    (something like chim is generating on laybackrig, whose :11435 reports util but no `present`).
+    Fail-OPEN: unset/unreachable → False (the box's own local guard still protects it)."""
     if not presence_url:
         return False
     try:
         d = (await client.get(presence_url.rstrip("/"), timeout=timeout)).json()
-        return bool(d.get("present"))
+        if bool(d.get("present")):
+            return True
+        u = d.get("util")
+        return isinstance(u, (int, float)) and u >= GAMING_UTIL_PCT
     except (httpx.HTTPError, ValueError):
         return False
 

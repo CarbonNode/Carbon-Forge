@@ -75,7 +75,7 @@ def register(mcp, ctx):
         # Routing policy: laybackrig's ComfyUI first; overflow to maingamingrig when laybackrig
         # is busy (a gen already running) — and never a box being gamed on (presence-gated).
         backends = [
-            {"url": cfg.comfy_url, "presence_url": "", "label": "laybackrig"},
+            {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
             {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
         ]
         if any(b["url"] for b in backends):
@@ -185,7 +185,7 @@ def register(mcp, ctx):
     async def _run_local_video_job(job_id, prompt, neg, w, h, length, steps, seed, fps):
         try:
             backends = [
-                {"url": cfg.comfy_url, "presence_url": "", "label": "laybackrig"},
+                {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
                 {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
             ]
             spec = g.LOCAL_VIDEO_MODELS["wan"]
