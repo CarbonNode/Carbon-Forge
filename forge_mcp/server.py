@@ -14,6 +14,7 @@ from starlette.routing import Route
 from forge_mcp import engine, storage
 from forge_mcp.config import load_config
 from forge_mcp.jobs import JobStore
+from forge_mcp.characters import CharacterStore
 from forge_mcp.tools import register_all
 
 cfg = load_config()
@@ -34,6 +35,7 @@ mcp = FastMCP(
 ctx = types.SimpleNamespace(
     cfg=cfg,
     jobs=JobStore(os.path.join(cfg.results_root, "jobs.json")),
+    characters=CharacterStore(cfg.results_root),
     http=None,             # created inside lifespan
     poll_and_finish=None,  # set by tools.gen.register
 )

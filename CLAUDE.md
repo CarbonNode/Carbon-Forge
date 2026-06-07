@@ -23,7 +23,7 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
   jobs.py         # persistent Veo job registry (/results/jobs.json), restart resume
   video.py        # ffmpeg trim/frames/convert
   engine.py       # async bridge to backend.processing (CPU semaphore, model-load lock)
-  tools/          # MCP tool definitions: proc, gen, vid, audio, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, batch/montage, generate_clip pipeline)
+  tools/          # MCP tool definitions: proc, gen, vid, audio, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, saved characters, audio TTS, batch/montage, generate_clip pipeline)
                   #   audio.py = generate_speech / list_voices (TTS: ElevenLabs cloud now;
                   #   local Chatterbox on the 4090 ComfyUI boxes is the next step)
 tests/            # pytest (26 tests) + manual_* live-smoke clients

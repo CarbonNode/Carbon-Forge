@@ -11,9 +11,18 @@ LOCAL_AR = {
     "9:16": (768, 1344), "16:9": (1344, 768),
 }
 
+_IPA_PRESETS = {"character": "PLUS (high strength)", "face": "PLUS FACE (portraits)",
+                "style": "PLUS (high strength)"}
+
+
+def _ipa_preset(mode):
+    """(preset, weight_type) for an IPAdapter mode."""
+    return _IPA_PRESETS.get(mode or "character", "PLUS (high strength)"), \
+        ("style transfer" if mode == "style" else "linear")
+
 
 def register(mcp, ctx):
-    cfg, jobs = ctx.cfg, ctx.jobs
+    cfg, jobs, chars = ctx.cfg, ctx.jobs, ctx.characters
 
     def _require_key():
         if not cfg.gemini_api_key:
@@ -193,25 +202,37 @@ def register(mcp, ctx):
         res["engine"] = f"esrgan-4x@{sel}"
         return {"image": res, "engine": res["engine"]}
 
+    async def _resolve_reference(character, reference_image, mode, weight):
+        """Returns (ref_bytes, mode, weight) from EITHER a saved character name OR a one-off
+        reference_image (URL/workspace path). Saved-character defaults fill in mode/weight when unset."""
+        if character:
+            ref_bytes, entry = chars.read_reference(character)
+            return ref_bytes, (mode or entry.get("mode") or "character"), \
+                (weight if weight is not None else entry.get("weight", 0.8))
+        if reference_image:
+            src = await storage.resolve_input(reference_image, cfg=cfg, kind="image")
+            return src.data, (mode or "character"), (weight if weight is not None else 0.8)
+        raise g.GenerationError("Provide either `character` (a saved name) or `reference_image`")
+
     @mcp.tool()
-    async def generate_with_reference(prompt: str, reference_image: str, project: str,
-                                      mode: str = "character", weight: float = 0.8,
-                                      aspect_ratio: str = "3:4", negative_prompt: str | None = None,
-                                      steps: int | None = None, seed: int | None = None,
-                                      subpath: str | None = None, filename: str | None = None) -> dict:
-        """Generate an image that KEEPS the character / face / style of a reference image (IPAdapter) —
-        LOCAL on the GPU pool, uncensored. Use it for the SAME character across scenes/poses, a
-        consistent mascot, or transferring an art style. reference_image: an https URL or a
-        '<Project>/<path>' workspace path. SDXL/pony only.
-          mode: 'character' (subject + style, general) | 'face' (portrait, face-locked) |
-                'style' (art style only, not the subject).
-          weight: 0.4-1.2 — how strongly to follow the reference (default 0.8; lower = more prompt freedom).
+    async def generate_with_reference(prompt: str, project: str, reference_image: str | None = None,
+                                      character: str | None = None, mode: str | None = None,
+                                      weight: float | None = None, aspect_ratio: str = "3:4",
+                                      negative_prompt: str | None = None, steps: int | None = None,
+                                      seed: int | None = None, subpath: str | None = None,
+                                      filename: str | None = None) -> dict:
+        """Generate an image that KEEPS the character / face / style of a reference (IPAdapter) — LOCAL
+        on the GPU pool, uncensored. Use it for the SAME character across scenes/poses, a consistent
+        mascot, or transferring an art style. SDXL/pony only.
+          character: a SAVED character name (see save_character / list_characters) — its stored
+            reference + default mode/weight are used. OR
+          reference_image: a one-off https URL / '<Project>/<path>' workspace path.
+          mode: 'character' (subject + style) | 'face' (portrait, face-locked) | 'style' (style only).
+          weight: 0.4-1.2 — how strongly to follow the reference (lower = more prompt freedom).
           aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9."""
-        src = await storage.resolve_input(reference_image, cfg=cfg, kind="image")
+        ref_bytes, mode, weight = await _resolve_reference(character, reference_image, mode, weight)
         w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
-        preset = {"character": "PLUS (high strength)", "face": "PLUS FACE (portraits)",
-                  "style": "PLUS (high strength)"}.get(mode, "PLUS (high strength)")
-        weight_type = "style transfer" if mode == "style" else "linear"
+        preset, weight_type = _ipa_preset(mode)
         backends = [
             {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
             {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
@@ -219,13 +240,40 @@ def register(mcp, ctx):
         chosen, sel = await g.select_comfy(ctx.http, backends)
         if not chosen:
             raise g.GenerationError(f"No GPU backend available for reference gen ({sel})")
-        imgs = await g.call_comfy_ref(ctx.http, chosen, src.data, prompt, model="pony", preset=preset,
+        imgs = await g.call_comfy_ref(ctx.http, chosen, ref_bytes, prompt, model="pony", preset=preset,
                                       weight=weight, weight_type=weight_type, negative_prompt=negative_prompt,
                                       width=w, height=h, steps=steps, seed=seed)
         res = await storage.save_result(imgs[0], project=project, subpath=subpath,
                                         filename=storage.safe_filename(filename or prompt[:40]), ext="png", cfg=cfg)
         res["engine"] = f"ipadapter-{mode}@{sel}"
-        return {"image": res, "engine": res["engine"], "mode": mode}
+        return {"image": res, "engine": res["engine"], "mode": mode, "character": character}
+
+    @mcp.tool()
+    async def save_character(name: str, reference_image: str, description: str | None = None,
+                             mode: str = "character", weight: float = 0.8) -> dict:
+        """Save a named CHARACTER from a reference image, so you can reuse it by name (consistent
+        character/face/style) in generate_with_reference and generate_clip — no need to re-pass the
+        image each time. reference_image: https URL or '<Project>/<path>'. Persists across restarts.
+          mode: default IPAdapter mode for this character — character | face | style.
+          weight: default reference strength (0.4-1.2). Re-saving the same name replaces it."""
+        src = await storage.resolve_input(reference_image, cfg=cfg, kind="image")
+        ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(src.mime, "png")
+        dims = list(storage._image_dims(src.data))
+        saved = chars.save(name=name, data=src.data, ext=ext, description=description, mode=mode,
+                           weight=weight, source=reference_image, dims=dims if dims[0] else None)
+        return {"saved": saved}
+
+    @mcp.tool()
+    async def list_characters() -> dict:
+        """List all saved characters (name, description, default mode/weight, ref size) — the named
+        references usable via the `character` param of generate_with_reference / generate_clip."""
+        cs = chars.list()
+        return {"count": len(cs), "characters": cs}
+
+    @mcp.tool()
+    async def delete_character(name: str) -> dict:
+        """Delete a saved character and its stored reference image."""
+        return chars.delete(name)
 
     async def _poll_and_finish(job_id: str, op: str):
         job = jobs.get(job_id)
@@ -357,7 +405,8 @@ def register(mcp, ctx):
                 "note": "Local I2V (Wan 2.2) takes a few minutes. Poll with job_status."}
 
     async def _run_clip_job(job_id, prompt, img_model, motion_prompt, iw, ih, vw, vh,
-                            length, steps, seed, fps, neg, do_upscale):
+                            length, steps, seed, fps, neg, do_upscale,
+                            char_ref=None, char_mode=None, char_weight=None):
         try:
             backends = [
                 {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
@@ -366,13 +415,20 @@ def register(mcp, ctx):
             job = jobs.get(job_id)
             base = storage.safe_filename(job["filename"] or prompt[:40])
             results = []
-            # 1) still
+            # 1) still — IPAdapter (consistent character) if a reference was given, else plain gen
             jobs.update(job_id, message="generating still…")
             chosen, sel = await g.select_comfy(ctx.http, backends)
             if not chosen:
                 raise g.GenerationError(f"No GPU backend for the still ({sel})")
-            stills = await g.call_comfy(ctx.http, chosen, prompt, model=img_model,
-                                        negative_prompt=neg, width=iw, height=ih, seed=seed)
+            if char_ref is not None:
+                preset, wt = _ipa_preset(char_mode)
+                stills = await g.call_comfy_ref(ctx.http, chosen, char_ref, prompt, model="pony",
+                                                preset=preset, weight=char_weight, weight_type=wt,
+                                                negative_prompt=neg, width=iw, height=ih, seed=seed)
+                sel = f"{sel}/ipadapter-{char_mode}"
+            else:
+                stills = await g.call_comfy(ctx.http, chosen, prompt, model=img_model,
+                                            negative_prompt=neg, width=iw, height=ih, seed=seed)
             still_bytes = stills[0]
             still_res = await storage.save_result(still_bytes, project=job["project"], subpath=job["subpath"],
                                                   filename=base, ext="png", cfg=cfg)
@@ -408,6 +464,8 @@ def register(mcp, ctx):
     async def generate_clip(prompt: str, project: str, img_model: str = "pony",
                             aspect_ratio: str = "16:9", seconds: float = 3.0,
                             motion_prompt: str | None = None, upscale: bool = False,
+                            character: str | None = None, character_mode: str | None = None,
+                            character_weight: float | None = None,
                             negative_prompt: str | None = None, steps: int | None = None,
                             seed: int | None = None, subpath: str | None = None,
                             filename: str | None = None) -> dict:
@@ -415,10 +473,19 @@ def register(mcp, ctx):
         ANIMATE it into a video (Wan 2.2 I2V) — all LOCAL on the GPU pool, uncensored & free. Returns
         a job_id immediately; poll job_status (results carry the still, the upscaled still if
         upscale=True, and the video, each tagged with `kind`).
-          img_model: pony (fast) | flux (best quality). aspect_ratio: 1:1,3:4,4:3,9:16,16:9. seconds: ~2-5.
-          motion_prompt: optional camera/motion guidance for the animation (defaults to `prompt`).
+          character: a SAVED character name (see save_character) — the still is generated as THAT
+            character (IPAdapter, forces the pony model), then animated. character_mode/character_weight
+            override its saved defaults.
+          img_model: pony (fast) | flux (best quality) — used only when no character is given.
+          aspect_ratio: 1:1,3:4,4:3,9:16,16:9. seconds: ~2-5. motion_prompt: motion/camera guidance.
         Note: upscale gives a hi-res STILL; the clip's resolution is set by aspect_ratio (Wan resizes the
         start frame), so upscaling doesn't raise the video's resolution."""
+        char_ref = char_mode = char_weight = None
+        if character:
+            ref_bytes, entry = chars.read_reference(character)  # raises if unknown
+            char_ref = ref_bytes
+            char_mode = character_mode or entry.get("mode") or "character"
+            char_weight = character_weight if character_weight is not None else entry.get("weight", 0.8)
         iw, ih = LOCAL_AR.get(aspect_ratio, (896, 1152))
         vw, vh = g.VIDEO_AR.get(aspect_ratio, (832, 480))
         fps = g.LOCAL_VIDEO_MODELS["wan-i2v"]["fps"]
@@ -427,9 +494,11 @@ def register(mcp, ctx):
         job = jobs.create(kind="clip", model="wan-i2v", prompt=prompt, project=project,
                           subpath=subpath, filename=filename)
         asyncio.create_task(_run_clip_job(job["id"], prompt, img_model, motion_prompt or prompt,
-                                          iw, ih, vw, vh, length, steps, seed, fps, negative_prompt, upscale))
+                                          iw, ih, vw, vh, length, steps, seed, fps, negative_prompt, upscale,
+                                          char_ref=char_ref, char_mode=char_mode, char_weight=char_weight))
         return {"job_id": job["id"], "status": "running",
-                "note": "Asset pipeline (still -> " + ("upscale -> " if upscale else "") + "animate). Poll job_status."}
+                "note": "Asset pipeline (" + (f"character:{character} -> " if character else "")
+                + "still -> " + ("upscale -> " if upscale else "") + "animate). Poll job_status."}
 
     async def _run_montage_job(job_id, shots, neg, w, h, length, steps, fps):
         try:
