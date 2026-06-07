@@ -315,6 +315,16 @@ async def comfy_has_models(client, comfy_url, unet_names, timeout=5.0) -> bool:
         return False
 
 
+async def comfy_free(client, comfy_url, timeout=8.0) -> None:
+    """Unload models + free VRAM on a box's ComfyUI after a gen, so chim/games get the card back
+    immediately (ComfyUI keeps the last model resident otherwise). Best-effort — never raises."""
+    try:
+        await client.post(f"{comfy_url.rstrip('/')}/free",
+                          json={"unload_models": True, "free_memory": True}, timeout=timeout)
+    except httpx.HTTPError:
+        pass
+
+
 async def comfy_reachable(client, comfy_url, timeout=4.0) -> bool:
     try:
         r = await client.get(f"{comfy_url.rstrip('/')}/system_stats", timeout=timeout)
@@ -391,7 +401,7 @@ async def eligible_comfy_backends(client, backends, require_unets=None):
 
 async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt=None,
                      width=832, height=1216, steps=None, cfg=None, seed=None,
-                     guidance=3.5, poll_seconds=240) -> list:
+                     guidance=3.5, poll_seconds=240, free_after=True) -> list:
     """Generate one image on the local ComfyUI box. Returns [png_bytes]. Raises GenerationError
     (so the tool can fall back to cloud) on any failure."""
     if model not in LOCAL_MODELS:
@@ -438,12 +448,14 @@ async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt
         "filename": out["filename"], "subfolder": out.get("subfolder", ""), "type": out.get("type", "output")})
     if r.status_code != 200 or not r.content:
         raise GenerationError(f"ComfyUI image fetch failed: HTTP {r.status_code}")
+    if free_after:
+        await comfy_free(client, base)  # hand the card back to chim/games after the gen
     return [r.content]
 
 
 async def call_comfy_video(client, comfy_url, prompt, *, model="wan", negative_prompt=None,
                            width=512, height=512, length=49, steps=None, seed=None, fps=None,
-                           poll_seconds=900) -> bytes:
+                           poll_seconds=900, free_after=True) -> bytes:
     """Generate a video on a local ComfyUI box (Wan 2.2 T2V). Returns mp4 bytes. Raises
     GenerationError on failure (so the tool can fall back to cloud Veo)."""
     spec = LOCAL_VIDEO_MODELS.get(model)
@@ -481,4 +493,6 @@ async def call_comfy_video(client, comfy_url, prompt, *, model="wan", negative_p
         "filename": out["filename"], "subfolder": out.get("subfolder", ""), "type": out.get("type", "output")})
     if r.status_code != 200 or not r.content:
         raise GenerationError(f"ComfyUI video fetch failed: HTTP {r.status_code}")
+    if free_after:
+        await comfy_free(client, base)  # hand the card back to chim/games after the gen
     return r.content

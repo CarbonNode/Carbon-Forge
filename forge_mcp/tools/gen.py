@@ -136,7 +136,8 @@ def register(mcp, ctx):
 
         async def _one(i, backend):
             imgs = await g.call_comfy(ctx.http, backend["url"], prompt, model=model,
-                                      negative_prompt=negative_prompt, width=w, height=h)  # fresh seed each call
+                                      negative_prompt=negative_prompt, width=w, height=h,
+                                      free_after=False)  # free once at the end, not between variations
             res = await storage.save_result(imgs[0], project=project, subpath=subpath,
                                             filename=f"{base}-{i + 1}", ext="png", cfg=cfg)
             res["engine"] = f"comfy:{model}@{backend['label']}"
@@ -144,6 +145,8 @@ def register(mcp, ctx):
 
         settled = await asyncio.gather(*[_one(i, elig[i % len(elig)]) for i in range(count)],
                                        return_exceptions=True)
+        for b in elig:
+            await g.comfy_free(ctx.http, b["url"])  # hand the cards back to chim/games
         images = [r for r in settled if not isinstance(r, Exception)]
         errors = [str(r) for r in settled if isinstance(r, Exception)]
         return {"count": len(images), "requested": count, "images": images,
@@ -272,8 +275,11 @@ def register(mcp, ctx):
             async def _seg(i, shot):
                 b = elig[i % len(elig)]
                 return await g.call_comfy_video(ctx.http, b["url"], shot, model="wan", negative_prompt=neg,
-                                                width=w, height=h, length=length, steps=steps, fps=fps)
+                                                width=w, height=h, length=length, steps=steps, fps=fps,
+                                                free_after=False)  # free once after all segments
             segs = await asyncio.gather(*[_seg(i, s) for i, s in enumerate(shots)])  # ordered → preserves shot order
+            for b in elig:
+                await g.comfy_free(ctx.http, b["url"])  # hand the cards back to chim/games
             jobs.update(job_id, message="stitching segments…")
             final = await video.concat(list(segs))
             job = jobs.get(job_id)
