@@ -96,7 +96,8 @@ def register(mcp, ctx):
     async def generate_local(prompt: str, project: str, model: str = "pony",
                              aspect_ratio: str = "3:4", steps: int | None = None,
                              cfg_scale: float | None = None, negative_prompt: str | None = None,
-                             seed: int | None = None, fallback: bool = True,
+                             seed: int | None = None, lora: str | None = None,
+                             lora_strength: float = 1.0, fallback: bool = True,
                              subpath: str | None = None, filename: str | None = None) -> dict:
         """Generate an image LOCALLY on the GPU box via ComfyUI — FULLY UNCENSORED (dark/gore/adult
         OK; no cloud content filter). Saves into the project's workspace folder.
@@ -105,8 +106,11 @@ def register(mcp, ctx):
                  installed checkpoint filename (see list_models).
           aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9.
         The model's quality-tag dialect + a sane negative prompt are auto-applied (override via negative_prompt).
-        If the GPU box is unreachable/busy and fallback=True, falls back to cloud Imagen 4 (filtered)."""
+        If the GPU box is unreachable/busy and fallback=True, falls back to cloud Imagen 4 (filtered).
+        lora: optional SDXL LoRA — a curated alias OR an installed .safetensors filename (see
+        list_models -> local_loras); lora_strength ~0.6-1.0. SDXL models only; ignored on cloud fallback."""
         w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
+        loras = [(g.resolve_lora(lora), lora_strength)] if lora else None
         engine = f"comfy:{model}"
         images, reason = None, None
         # Routing policy: laybackrig's ComfyUI first; overflow to maingamingrig when laybackrig
@@ -126,11 +130,11 @@ def register(mcp, ctx):
                     req_ckpt = None
             chosen_url, sel = await g.select_comfy(ctx.http, backends, require_checkpoints=req_ckpt)
             if chosen_url:
-                engine = f"comfy:{model}@{sel}"
+                engine = f"comfy:{model}{('+lora:' + lora) if lora else ''}@{sel}"
                 try:
                     images = await g.call_comfy(ctx.http, chosen_url, prompt, model=model,
                                                 negative_prompt=negative_prompt, width=w, height=h,
-                                                steps=steps, cfg=cfg_scale, seed=seed)
+                                                steps=steps, cfg=cfg_scale, seed=seed, loras=loras)
                 except g.GenerationError as e:
                     reason = str(e)
             else:
@@ -280,7 +284,8 @@ def register(mcp, ctx):
                                       character: str | None = None, mode: str | None = None,
                                       weight: float | None = None, aspect_ratio: str = "3:4",
                                       negative_prompt: str | None = None, steps: int | None = None,
-                                      seed: int | None = None, subpath: str | None = None,
+                                      seed: int | None = None, lora: str | None = None,
+                                      lora_strength: float = 1.0, subpath: str | None = None,
                                       filename: str | None = None) -> dict:
         """Generate an image that KEEPS the character / face / style of a reference (IPAdapter) — LOCAL
         on the GPU pool, uncensored. Use it for the SAME character across scenes/poses, a consistent
@@ -290,9 +295,11 @@ def register(mcp, ctx):
           reference_image: a one-off https URL / '<Project>/<path>' workspace path.
           mode: 'character' (subject + style) | 'face' (portrait, face-locked) | 'style' (style only).
           weight: 0.4-1.2 — how strongly to follow the reference (lower = more prompt freedom).
+          lora: optional SDXL LoRA (curated alias or installed filename; see list_models) applied on top.
           aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9."""
         ref_images, mode, weight = await _resolve_reference(character, reference_image, mode, weight)
         w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
+        loras = [(g.resolve_lora(lora), lora_strength)] if lora else None
         preset, weight_type = _ipa_preset(mode)
         backends = [
             {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
@@ -303,10 +310,10 @@ def register(mcp, ctx):
             raise g.GenerationError(f"No GPU backend available for reference gen ({sel})")
         imgs = await g.call_comfy_ref(ctx.http, chosen, ref_images, prompt, model="pony", preset=preset,
                                       weight=weight, weight_type=weight_type, negative_prompt=negative_prompt,
-                                      width=w, height=h, steps=steps, seed=seed)
+                                      width=w, height=h, steps=steps, seed=seed, loras=loras)
         res = await storage.save_result(imgs[0], project=project, subpath=subpath,
                                         filename=storage.safe_filename(filename or prompt[:40]), ext="png", cfg=cfg)
-        res["engine"] = f"ipadapter-{mode}@{sel}"
+        res["engine"] = f"ipadapter-{mode}{('+lora:' + lora) if lora else ''}@{sel}"
         return {"image": res, "engine": res["engine"], "mode": mode, "character": character}
 
     @mcp.tool()
@@ -484,7 +491,8 @@ def register(mcp, ctx):
         return {"job_id": job["id"], "status": "running",
                 "note": "Local video (Wan 2.2) takes a few minutes. Poll with job_status."}
 
-    async def _run_i2v_job(job_id, image_bytes, prompt, neg, w, h, length, steps, seed, fps, model="wan-i2v"):
+    async def _run_i2v_job(job_id, image_bytes, prompt, neg, w, h, length, steps, seed, fps,
+                           model="wan-i2v", lora=None, lora_strength=1.0):
         try:
             backends = [
                 {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
@@ -496,35 +504,44 @@ def register(mcp, ctx):
                 raise g.GenerationError(f"No I2V backend available ({sel}) — all busy/gaming or lacking the Wan I2V models")
             jobs.update(job_id, message=f"animating on {sel}…")
             mp4 = await g.call_comfy_i2v(ctx.http, chosen, image_bytes, prompt, model=model, negative_prompt=neg,
-                                         width=w, height=h, length=length, steps=steps, seed=seed, fps=fps)
+                                         width=w, height=h, length=length, steps=steps, seed=seed, fps=fps,
+                                         lora=lora, lora_strength=lora_strength)
             job = jobs.get(job_id)
             res = await storage.save_result(mp4, project=job["project"], subpath=job["subpath"],
                                             filename=job["filename"] or "i2v", ext="mp4", cfg=cfg)
-            jobs.update(job_id, status="done", message=f"complete (engine={model}@{sel})", results=[res])
+            eng = f"{model}{('+lora:' + lora) if lora else ''}@{sel}"
+            jobs.update(job_id, status="done", message=f"complete (engine={eng})", results=[res])
         except Exception as e:
             jobs.update(job_id, status="failed", error=str(e))
 
     @mcp.tool()
     async def animate_image(image: str, project: str, prompt: str = "", aspect_ratio: str = "16:9",
-                            seconds: float = 3.0, nsfw: bool = False, negative_prompt: str | None = None,
+                            seconds: float = 3.0, nsfw: bool = False, lora: str | None = None,
+                            lora_strength: float = 1.0, negative_prompt: str | None = None,
                             steps: int | None = None, seed: int | None = None,
                             subpath: str | None = None, filename: str | None = None) -> dict:
         """Animate a still IMAGE into a video LOCALLY via ComfyUI + Wan 2.2 I2V — FULLY UNCENSORED,
         FREE. image: an https URL or a '<Project>/<path>' workspace path (e.g. a fresh generate_image
         output, or anything in Carbon Drive). prompt: optional motion/camera guidance ("slow zoom in,
-        hair blowing"). nsfw=True adds the explicit Wan NSFW-22 LoRA pair (wan-i2v-spicy) for animating
-        adult stills. Routes across the gen-pool, skipping any box being gamed-on / running chim.
+        hair blowing"). nsfw=True adds the broad Wan NSFW-22 LoRA pair (= lora='general'). lora: pick a
+        specific curated Wan I2V LoRA pair instead (see list_models -> local_loras.video_pairs), applied
+        on the wan-i2v base experts. Routes across the gen-pool, skipping any box being gamed-on / running chim.
         Takes a few minutes — returns a job_id immediately; poll with job_status.
         aspect_ratio: 1:1, 16:9, 9:16, 4:3, 3:4. seconds: clip length (~2-5)."""
         src = await storage.resolve_input(image, cfg=cfg, kind="image")
-        model = "wan-i2v-spicy" if nsfw else "wan-i2v"
+        if lora:
+            g.resolve_wan_i2v_lora(lora)  # validate now (the background job would otherwise swallow it)
+            model = "wan-i2v"             # base experts; the selected pair is applied on top
+        else:
+            model = "wan-i2v-spicy" if nsfw else "wan-i2v"
         w, h = g.VIDEO_AR.get(aspect_ratio, (832, 480))
         fps = g.LOCAL_VIDEO_MODELS[model]["fps"]
         length = max(17, int(round(seconds * fps / 4)) * 4 + 1)  # Wan wants 4n+1 frames
         storage.validate_project(project, cfg=cfg)
         job = jobs.create(kind=model, model=model, prompt=prompt or "(animate)", project=project,
                           subpath=subpath, filename=filename)
-        asyncio.create_task(_run_i2v_job(job["id"], src.data, prompt, negative_prompt, w, h, length, steps, seed, fps, model))
+        asyncio.create_task(_run_i2v_job(job["id"], src.data, prompt, negative_prompt, w, h, length,
+                                         steps, seed, fps, model, lora, lora_strength))
         return {"job_id": job["id"], "status": "running",
                 "note": "Local I2V (Wan 2.2) takes a few minutes. Poll with job_status."}
 

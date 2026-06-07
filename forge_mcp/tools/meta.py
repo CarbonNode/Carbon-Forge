@@ -49,14 +49,23 @@ def register(mcp, ctx):
             {"url": cfg.comfy_overflow_url, "label": "maingamingrig"},
         ]
         installed = {}
+        installed_loras = {}
         for b in backends:
             if b["url"]:
                 cks = await g.comfy_checkpoints(ctx.http, b["url"])
                 if cks:
                     installed[b["label"]] = cks
+                lrs = await g.comfy_loras(ctx.http, b["url"])
+                if lrs:
+                    installed_loras[b["label"]] = lrs
         return {
             "local_aliases": {a: {"checkpoint": c, "family": f, "style": s} for a, (c, f, s) in g.LOCAL_MODELS.items()},
             "installed_checkpoints": installed,
+            "local_loras": {
+                "image_aliases": dict(g.LOCAL_LORAS),
+                "video_pairs": {a: list(p) for a, p in g.WAN_I2V_LORAS.items()},
+                "installed": installed_loras,
+            },
             "local_video": list(g.LOCAL_VIDEO_MODELS.keys()),
             "background_removal": AVAILABLE_MODELS,
             "image_generation_cloud": list(IMAGE_MODEL_ALIASES.keys()),

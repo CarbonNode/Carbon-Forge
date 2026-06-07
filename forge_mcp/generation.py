@@ -387,6 +387,27 @@ def resolve_style(model: str) -> str:
     return "pony"
 
 
+# Curated SDXL LoRA aliases -> filename. The `lora` param of generate_local / generate_with_reference
+# accepts an alias here OR any .safetensors actually installed in ComfyUI's models/loras (auto-discovered,
+# like checkpoints — drop one in + sync and it's usable by filename, no code change). Add aliases as you
+# settle on go-to LoRAs (style / detail / concept). SDXL family only (Flux LoRAs are loaded differently).
+LOCAL_LORAS: dict[str, str] = {
+    # "skin": "real_skin_xl.safetensors",
+}
+
+
+def resolve_lora(name: str) -> str:
+    """Filename for an SDXL LoRA: a curated alias (LOCAL_LORAS) OR a raw installed .safetensors name."""
+    if name in LOCAL_LORAS:
+        return LOCAL_LORAS[name]
+    if name.endswith((".safetensors", ".ckpt", ".pt", ".sft")):
+        return name
+    aliases = ", ".join(LOCAL_LORAS) or "none curated yet"
+    raise GenerationError(
+        f"Unknown LoRA '{name}'. Use a curated alias ({aliases}) or an installed .safetensors "
+        f"filename (see list_models -> local_loras.installed).")
+
+
 # Each SDXL checkpoint family expects a different quality-tag dialect. We auto-apply the right one per
 # model (see resolve_style / build_sdxl_prompts) so callers needn't know it. An explicit negative_prompt
 # always wins, and a positive prompt that already opens with the dialect's signature tag is left as-is.
@@ -420,8 +441,22 @@ def build_sdxl_prompts(model: str, prompt: str, negative_prompt: str | None) -> 
     return pos, (negative_prompt or PONY_NEG_DEFAULT)
 
 
-def _sdxl_workflow(ckpt, pos, neg, width, height, steps, cfg, seed):
-    return {
+def _sdxl_lora_chain(wf, loras):
+    """Splice LoraLoader node(s) after the checkpoint (node '4'), chaining MODEL+CLIP through each so the
+    LoRA patches both (SDXL LoRAs touch the text encoder too). loras: list of (filename, strength).
+    Returns (model_ref, clip_ref) for the sampler + text encoders to consume."""
+    model_ref, clip_ref = ["4", 0], ["4", 1]
+    for i, (name, strength) in enumerate(loras):
+        nid = f"L{i}"
+        wf[nid] = {"class_type": "LoraLoader", "inputs": {
+            "lora_name": name, "strength_model": strength, "strength_clip": strength,
+            "model": model_ref, "clip": clip_ref}}
+        model_ref, clip_ref = [nid, 0], [nid, 1]
+    return model_ref, clip_ref
+
+
+def _sdxl_workflow(ckpt, pos, neg, width, height, steps, cfg, seed, loras=None):
+    wf = {
         "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
         "10": {"class_type": "VAELoader", "inputs": {"vae_name": "sdxl_vae.safetensors"}},
         "6": {"class_type": "CLIPTextEncode", "inputs": {"text": pos, "clip": ["4", 1]}},
@@ -434,6 +469,12 @@ def _sdxl_workflow(ckpt, pos, neg, width, height, steps, cfg, seed):
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["10", 0]}},
         "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "forge", "images": ["8", 0]}},
     }
+    if loras:  # patch MODEL+CLIP through the LoRA chain, then repoint the sampler + both text encoders
+        model_ref, clip_ref = _sdxl_lora_chain(wf, loras)
+        wf["3"]["inputs"]["model"] = model_ref
+        wf["6"]["inputs"]["clip"] = clip_ref
+        wf["7"]["inputs"]["clip"] = clip_ref
+    return wf
 
 
 def _flux_workflow(ckpt, pos, width, height, steps, seed, guidance=3.5):
@@ -486,6 +527,25 @@ LOCAL_VIDEO_MODELS = {
         "shift": 8.0, "cfg": 3.5, "steps": 20, "fps": 16,
     },
 }
+
+
+# Curated Wan 2.2 I2V LoRA pairs for animate_image's `lora` selector: alias -> (high-noise file, low-noise
+# file). Wan 2.2 splits into a high- and a low-noise expert, so each act/concept LoRA ships as a high/low
+# PAIR; the alias maps to both, applied via LoraLoaderModelOnly on each expert (see _wan_i2v_workflow).
+# 'general' = the broad NSFW-22 pair (what nsfw=True / wan-i2v-spicy uses). Both files must live in
+# models/loras on the box. Add act-specific pairs here as you install them (HF has many non-gated ones).
+WAN_I2V_LORAS: dict[str, tuple[str, str]] = {
+    "general": ("NSFW-22-H-e8.safetensors", "NSFW-22-L-e8.safetensors"),
+}
+
+
+def resolve_wan_i2v_lora(name: str) -> tuple[str, str]:
+    """(high_file, low_file) for a curated Wan I2V LoRA pair alias (WAN_I2V_LORAS)."""
+    if name in WAN_I2V_LORAS:
+        return WAN_I2V_LORAS[name]
+    raise GenerationError(f"Unknown Wan I2V LoRA '{name}'. Use one of: {', '.join(WAN_I2V_LORAS)}")
+
+
 WAN_NEG_DEFAULT = "blurry, low quality, static, distorted, watermark, text, jpeg artifacts"
 # aspect -> (w,h) at ~480p base (Wan upscales well; keep base modest for speed)
 VIDEO_AR = {"1:1": (512, 512), "16:9": (832, 480), "9:16": (480, 832), "4:3": (640, 480), "3:4": (480, 640)}
@@ -533,6 +593,17 @@ async def comfy_checkpoints(client, comfy_url, timeout=5.0) -> list:
     try:
         d = (await client.get(f"{comfy_url.rstrip('/')}/object_info/CheckpointLoaderSimple", timeout=timeout)).json()
         opts = d.get("CheckpointLoaderSimple", {}).get("input", {}).get("required", {}).get("ckpt_name", [[]])[0]
+        return list(opts) if isinstance(opts, list) else []
+    except (httpx.HTTPError, ValueError, KeyError):
+        return []
+
+
+async def comfy_loras(client, comfy_url, timeout=5.0) -> list:
+    """Live list of LoRA files installed on a box's ComfyUI (LoraLoader enum). Like comfy_checkpoints:
+    drop a .safetensors in models/loras, sync, and it shows up here — usable by filename, no code change."""
+    try:
+        d = (await client.get(f"{comfy_url.rstrip('/')}/object_info/LoraLoader", timeout=timeout)).json()
+        opts = d.get("LoraLoader", {}).get("input", {}).get("required", {}).get("lora_name", [[]])[0]
         return list(opts) if isinstance(opts, list) else []
     except (httpx.HTTPError, ValueError, KeyError):
         return []
@@ -631,9 +702,10 @@ async def eligible_comfy_backends(client, backends, require_unets=None, require_
 
 async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt=None,
                      width=832, height=1216, steps=None, cfg=None, seed=None,
-                     guidance=3.5, poll_seconds=240, free_after=True) -> list:
+                     guidance=3.5, loras=None, poll_seconds=240, free_after=True) -> list:
     """Generate one image on the local ComfyUI box. Returns [png_bytes]. Raises GenerationError
-    (so the tool can fall back to cloud) on any failure."""
+    (so the tool can fall back to cloud) on any failure. loras: optional list of (filename, strength)
+    SDXL LoRAs spliced into the graph (ignored for the Flux family)."""
     ckpt, family = resolve_model(model)
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
@@ -641,7 +713,7 @@ async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt
 
     if family == "sdxl":
         pos, neg = build_sdxl_prompts(model, prompt, negative_prompt)
-        wf = _sdxl_workflow(ckpt, pos, neg, width, height, steps or 28, cfg or 6.5, seed)
+        wf = _sdxl_workflow(ckpt, pos, neg, width, height, steps or 28, cfg or 6.5, seed, loras=loras)
     else:  # flux
         wf = _flux_workflow(ckpt, prompt, width, height, steps or 20, seed, guidance)
 
@@ -680,12 +752,14 @@ async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt
     return [r.content]
 
 
-def _sdxl_ipadapter_workflow(ckpt, pos, neg, width, height, steps, cfg, seed, ref_names, preset, weight, weight_type):
+def _sdxl_ipadapter_workflow(ckpt, pos, neg, width, height, steps, cfg, seed, ref_names, preset, weight, weight_type, loras=None):
     """SDXL graph with IPAdapter injected between the checkpoint MODEL and the KSampler, so the gen
     carries the character/face/style of the reference(s). Reuses the plain SDXL graph + repoints
     node 3's model input through IPAdapterUnifiedLoader → IPAdapterAdvanced. Multiple references are
-    batched (ImageBatch) and averaged (combine_embeds='average') for a stronger, more robust likeness."""
-    wf = _sdxl_workflow(ckpt, pos, neg, width, height, steps, cfg, seed)
+    batched (ImageBatch) and averaged (combine_embeds='average') for a stronger, more robust likeness.
+    Any LoRA chain is applied first, and the IPAdapter loads on top of the LoRA'd model."""
+    wf = _sdxl_workflow(ckpt, pos, neg, width, height, steps, cfg, seed, loras=loras)
+    base_model = wf["3"]["inputs"]["model"]  # LoRA'd model if loras present, else ["4", 0]
     load_ids = []
     for i, name in enumerate(ref_names):
         nid = str(30 + i)
@@ -697,7 +771,7 @@ def _sdxl_ipadapter_workflow(ckpt, pos, neg, width, height, steps, cfg, seed, re
         wf[bid] = {"class_type": "ImageBatch", "inputs": {"image1": image_ref, "image2": [load_ids[i], 0]}}
         image_ref = [bid, 0]
     combine = "average" if len(load_ids) > 1 else "concat"
-    wf["21"] = {"class_type": "IPAdapterUnifiedLoader", "inputs": {"model": ["4", 0], "preset": preset}}
+    wf["21"] = {"class_type": "IPAdapterUnifiedLoader", "inputs": {"model": base_model, "preset": preset}}
     wf["22"] = {"class_type": "IPAdapterAdvanced", "inputs": {
         "model": ["21", 0], "ipadapter": ["21", 1], "image": image_ref, "weight": weight,
         "weight_type": weight_type, "combine_embeds": combine, "start_at": 0.0, "end_at": 1.0,
@@ -709,7 +783,7 @@ def _sdxl_ipadapter_workflow(ckpt, pos, neg, width, height, steps, cfg, seed, re
 async def call_comfy_ref(client, comfy_url, ref_images, prompt, *, model="pony",
                          preset="PLUS (high strength)", weight=0.8, weight_type="linear",
                          negative_prompt=None, width=832, height=1216, steps=None, cfg=None,
-                         seed=None, poll_seconds=240, free_after=True) -> list:
+                         seed=None, loras=None, poll_seconds=240, free_after=True) -> list:
     """Generate an image conditioned on REFERENCE image(s) via IPAdapter (character/face/style
     consistency). ref_images: bytes or a list of bytes (multiple angles → averaged likeness).
     SDXL/pony family only. Returns [png_bytes]. Raises GenerationError on failure."""
@@ -726,7 +800,7 @@ async def call_comfy_ref(client, comfy_url, ref_images, prompt, *, model="pony",
     pos, neg = build_sdxl_prompts(model, prompt, negative_prompt)
     names = [await comfy_upload_image(client, base, b, f"forge_ref_{i}.png") for i, b in enumerate(ref_images)]
     wf = _sdxl_ipadapter_workflow(ckpt, pos, neg, width, height,
-                                  steps or 28, cfg or 6.5, seed, names, preset, weight, weight_type)
+                                  steps or 28, cfg or 6.5, seed, names, preset, weight, weight_type, loras=loras)
     q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": wf, "client_id": "forge"})
     pid = q.get("prompt_id")
     if not pid:
@@ -885,13 +959,18 @@ def _wan_i2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps, i
 
 async def call_comfy_i2v(client, comfy_url, image_bytes, prompt, *, model="wan-i2v", negative_prompt=None,
                          width=832, height=480, length=49, steps=None, seed=None, fps=None,
-                         poll_seconds=900, free_after=True) -> bytes:
+                         lora=None, lora_strength=1.0, poll_seconds=900, free_after=True) -> bytes:
     """Animate a still into a video on a local ComfyUI box (Wan 2.2 I2V). image_bytes = the start
     frame. model: 'wan-i2v' (clean) or 'wan-i2v-spicy' (uncensored — adds the NSFW-22 LoRA pair).
+    lora: optional curated WAN_I2V_LORAS alias — applies that high/low pair on top of the base experts
+    (overrides the model's baked-in pair), so a single 'wan-i2v' base can drive any installed act LoRA.
     Returns mp4 bytes. Raises GenerationError on failure."""
     spec = LOCAL_VIDEO_MODELS.get(model)
     if not spec or "clip_vision" not in spec:
         raise GenerationError(f"'{model}' is not a Wan I2V model; use 'wan-i2v' or 'wan-i2v-spicy'")
+    if lora:  # selected pair wins over the model's baked-in LoRAs
+        high, low = resolve_wan_i2v_lora(lora)
+        spec = {**spec, "lora_high": high, "lora_low": low, "lora_strength": lora_strength}
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
     base = comfy_url.rstrip("/")
