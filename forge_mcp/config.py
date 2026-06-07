@@ -13,6 +13,8 @@ class Config:
     comfy_presence_url: str            # primary box (laybackrig) gpu-status (:11435) — yield it to chim (high GPU util)
     comfy_overflow_url: str            # 2nd ComfyUI (e.g. maingamingrig) for overflow when primary is busy/gaming
     comfy_overflow_presence_url: str   # its gpu-presence endpoint (:11435) — skip overflow if that box is being gamed on
+    chatterbox_url: str                # local Chatterbox TTS container (this box, :5126)
+    chatterbox_overflow_url: str       # 2nd box's Chatterbox (maingamingrig) for overflow
     workspace_root: str
     workspace_display_root: str
     results_root: str
@@ -33,6 +35,8 @@ def load_config() -> Config:
         comfy_presence_url=os.environ.get("FORGE_COMFY_PRESENCE_URL", "http://host.docker.internal:11435").rstrip("/"),
         comfy_overflow_url=os.environ.get("FORGE_COMFY_OVERFLOW_URL", "").rstrip("/"),
         comfy_overflow_presence_url=os.environ.get("FORGE_COMFY_OVERFLOW_PRESENCE_URL", "").rstrip("/"),
+        chatterbox_url=os.environ.get("FORGE_CHATTERBOX_URL", "http://host.docker.internal:5126").rstrip("/"),
+        chatterbox_overflow_url=os.environ.get("FORGE_CHATTERBOX_OVERFLOW_URL", "").rstrip("/"),
         workspace_root=os.environ.get("FORGE_WORKSPACE_ROOT", "/workspace"),
         workspace_display_root=os.environ.get("FORGE_WORKSPACE_DISPLAY_ROOT", "C:\\Workspace"),
         results_root=os.environ.get("FORGE_RESULTS_ROOT", "/results"),

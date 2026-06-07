@@ -271,6 +271,57 @@ async def list_elevenlabs_voices(client, api_key) -> list:
             for v in voices]
 
 
+# ---- Local Chatterbox TTS (isolated GPU container; see chatterbox_service/) ----
+# Same primary→overflow, presence-yield routing as ComfyUI, but over the Chatterbox
+# /tts HTTP endpoints. box_gaming() (defined below) is resolved at call time.
+
+async def chatterbox_reachable(client, url, timeout=4.0) -> bool:
+    if not url:
+        return False
+    try:
+        r = await client.get(f"{url.rstrip('/')}/health", timeout=timeout)
+        return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+async def select_chatterbox(client, cfg) -> tuple[str | None, str]:
+    """Pick a Chatterbox backend: primary unless its box is gamed-on/unreachable, then
+    overflow. Reuses the ComfyUI presence endpoints (same boxes). (url, label) or (None, reason)."""
+    candidates = [
+        (cfg.chatterbox_url, cfg.comfy_presence_url, "laybackrig"),
+        (cfg.chatterbox_overflow_url, cfg.comfy_overflow_presence_url, "maingamingrig"),
+    ]
+    reachable = []
+    for url, presence, label in candidates:
+        if not await chatterbox_reachable(client, url):
+            continue
+        if await box_gaming(client, presence):
+            continue
+        reachable.append((url, label))
+    if reachable:
+        return reachable[0]
+    return None, "no reachable Chatterbox backend (unreachable, or the box is gaming)"
+
+
+async def call_chatterbox(client, url, text, *, exaggeration=0.5, cfg_weight=0.5,
+                          audio_prompt_bytes=None, timeout=300) -> bytes:
+    """Synthesize speech on a local Chatterbox container. Returns wav bytes. Raises
+    GenerationError. audio_prompt_bytes = a reference clip for zero-shot voice cloning."""
+    body = {"text": text, "exaggeration": exaggeration, "cfg_weight": cfg_weight}
+    if audio_prompt_bytes:
+        body["audio_prompt_b64"] = base64.b64encode(audio_prompt_bytes).decode()
+    try:
+        r = await client.post(f"{url.rstrip('/')}/tts", json=body, timeout=timeout)
+    except httpx.HTTPError as e:
+        raise GenerationError(f"Chatterbox request failed: {e}") from e
+    if r.status_code >= 400:
+        raise GenerationError(f"Chatterbox HTTP {r.status_code}: {r.text[:300]}")
+    if not r.content:
+        raise GenerationError("Chatterbox returned empty audio")
+    return r.content
+
+
 # ---- Local diffusion via ComfyUI (uncensored; runs on the 4090 box over the LAN) ----
 # Workflows below are validated against the live ComfyUI (gemini-flash/Imagen still available
 # as the cloud fallback when the box is unreachable). Each returns raw PNG bytes — same
