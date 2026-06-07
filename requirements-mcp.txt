@@ -6,6 +6,3 @@ pillow>=10
 numpy
 scipy
 onnxruntime>=1.17.0
-trafilatura>=1.12       # web page -> clean markdown (extract_page)
-yt-dlp>=2024.0          # video/audio site extractor + captions (extract_media)
-faster-whisper>=1.0     # local transcription fallback (CPU int8)

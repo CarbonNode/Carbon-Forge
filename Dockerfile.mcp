@@ -5,8 +5,12 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+RUN pip install --no-cache-dir -U pip
 COPY requirements-mcp.txt .
 RUN pip install --no-cache-dir -r requirements-mcp.txt
+# Content-extractor deps in a SEPARATE layer — resolving them together with the base graph
+# segfaulted pip's resolver, so install them on top of the already-satisfied base.
+RUN pip install --no-cache-dir trafilatura yt-dlp faster-whisper
 
 COPY backend/__init__.py backend/processing.py backend/
 COPY forge_mcp/ forge_mcp/
