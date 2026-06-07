@@ -19,11 +19,13 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
   server.py       # FastMCP assembly: bearer auth on /mcp, /health, /files/<id>/<name>, lifespan
   config.py       # FORGE_* env config
   storage.py      # input resolution (URL | '<Project>/<path>'), dual-write results, URL minting, janitor
-  generation.py   # Imagen 4 / Gemini image / Veo client (port of main.js logic)
+  generation.py   # Imagen 4 / Gemini image / Veo + ElevenLabs TTS + local ComfyUI (SDXL/Flux/Wan/ESRGAN)
   jobs.py         # persistent Veo job registry (/results/jobs.json), restart resume
   video.py        # ffmpeg trim/frames/convert
   engine.py       # async bridge to backend.processing (CPU semaphore, model-load lock)
-  tools/          # MCP tool definitions: proc, gen, vid, meta (24 tools — incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, batch/montage, generate_clip pipeline)
+  tools/          # MCP tool definitions: proc, gen, vid, audio, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, batch/montage, generate_clip pipeline)
+                  #   audio.py = generate_speech / list_voices (TTS: ElevenLabs cloud now;
+                  #   local Chatterbox on the 4090 ComfyUI boxes is the next step)
 tests/            # pytest (26 tests) + manual_* live-smoke clients
 Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 ```

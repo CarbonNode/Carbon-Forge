@@ -214,6 +214,63 @@ async def download_veo_video(client, sample: dict, api_key: str) -> bytes:
     raise last_err or GenerationError("Veo MP4 download failed")
 
 
+# ---- ElevenLabs TTS (cloud) ----
+# Expressive text-to-speech + a big prebuilt voice library + instant cloning. Returns mp3 bytes
+# (same raw-bytes contract as call_imagen). Needs ELEVENLABS_API_KEY in the service .env.
+
+ELEVENLABS_API = "https://api.elevenlabs.io/v1"
+DEFAULT_ELEVEN_MODEL = "eleven_multilingual_v2"      # high quality; eleven_turbo_v2_5 = low latency
+DEFAULT_ELEVEN_VOICE = "21m00Tcm4TlvDq8ikWAM"        # "Rachel" — ElevenLabs' public default voice
+
+
+async def call_elevenlabs(client, api_key, text, *, voice_id=None, model_id=None,
+                          stability=0.5, similarity_boost=0.75, style=0.0,
+                          output_format="mp3_44100_128", max_retries=3, retry_delay=1.0) -> bytes:
+    """Synthesize speech via ElevenLabs. Returns mp3 bytes. Raises GenerationError (readable)."""
+    if not api_key:
+        raise GenerationError("ELEVENLABS_API_KEY is not configured on the forge service")
+    if not (text or "").strip():
+        raise GenerationError("text is required")
+    voice_id = voice_id or DEFAULT_ELEVEN_VOICE
+    model_id = model_id or DEFAULT_ELEVEN_MODEL
+    url = f"{ELEVENLABS_API}/text-to-speech/{voice_id}"
+    body = {"text": text, "model_id": model_id,
+            "voice_settings": {"stability": stability, "similarity_boost": similarity_boost, "style": style}}
+    headers = {"xi-api-key": api_key, "accept": "audio/mpeg", "content-type": "application/json"}
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            resp = await client.post(url, headers=headers, params={"output_format": output_format},
+                                     json=body, timeout=120)
+        except httpx.HTTPError as e:
+            last_err = GenerationError(f"ElevenLabs request failed: {e}")
+            await asyncio.sleep(retry_delay * (attempt + 1)); continue
+        if resp.status_code == 429 or resp.status_code >= 500:
+            last_err = GenerationError(f"ElevenLabs HTTP {resp.status_code}: {resp.text[:300]}")
+            await asyncio.sleep(retry_delay * (attempt + 1)); continue
+        if resp.status_code >= 400:
+            raise GenerationError(f"ElevenLabs HTTP {resp.status_code}: {resp.text[:300]}")
+        if not resp.content:
+            raise GenerationError("ElevenLabs returned empty audio")
+        return resp.content
+    raise last_err or GenerationError("ElevenLabs failed after retries")
+
+
+async def list_elevenlabs_voices(client, api_key) -> list:
+    """List the account's ElevenLabs voices: [{voice_id, name, category}]."""
+    if not api_key:
+        raise GenerationError("ELEVENLABS_API_KEY is not configured on the forge service")
+    try:
+        r = await client.get(f"{ELEVENLABS_API}/voices", headers={"xi-api-key": api_key}, timeout=30)
+    except httpx.HTTPError as e:
+        raise GenerationError(f"ElevenLabs request failed: {e}") from e
+    if r.status_code >= 400:
+        raise GenerationError(f"ElevenLabs HTTP {r.status_code}: {r.text[:300]}")
+    voices = (r.json() or {}).get("voices", [])
+    return [{"voice_id": v.get("voice_id"), "name": v.get("name"), "category": v.get("category")}
+            for v in voices]
+
+
 # ---- Local diffusion via ComfyUI (uncensored; runs on the 4090 box over the LAN) ----
 # Workflows below are validated against the live ComfyUI (gemini-flash/Imagen still available
 # as the cloud fallback when the box is unreachable). Each returns raw PNG bytes — same
