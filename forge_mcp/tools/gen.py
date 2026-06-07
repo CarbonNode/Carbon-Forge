@@ -100,9 +100,11 @@ def register(mcp, ctx):
                              subpath: str | None = None, filename: str | None = None) -> dict:
         """Generate an image LOCALLY on the GPU box via ComfyUI — FULLY UNCENSORED (dark/gore/adult
         OK; no cloud content filter). Saves into the project's workspace folder.
-          model: 'pony' (fast SDXL ~5-8s, maximally uncensored) | 'flux' (best quality/coherence ~15-20s).
+          model: 'pony' (fast, anime-lean, max uncensored) | 'cyberrealistic' / 'bigasp' (PHOTOREAL NSFW) |
+                 'illustrious' (anime) | 'juggernaut' (general photoreal) | 'flux' (best coherence) | or any
+                 installed checkpoint filename (see list_models).
           aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9.
-        Pony score-tags + a sane negative prompt are applied automatically (override via negative_prompt).
+        The model's quality-tag dialect + a sane negative prompt are auto-applied (override via negative_prompt).
         If the GPU box is unreachable/busy and fallback=True, falls back to cloud Imagen 4 (filtered)."""
         w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
         engine = f"comfy:{model}"

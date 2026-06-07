@@ -344,12 +344,16 @@ async def call_chatterbox(client, url, text, *, exaggeration=0.5, cfg_weight=0.5
 # contract as call_imagen / call_gemini_image.
 
 LOCAL_MODELS = {
-    # Curated aliases -> (checkpoint filename, family). Friendly names + correct family; but `model`
-    # may ALSO be any checkpoint filename installed in ComfyUI (auto-discovered) — see resolve_model.
-    "pony": ("ponyDiffusionV6XL.safetensors", "sdxl"),   # fast, maximally uncensored
-    "flux": ("flux1-dev-fp8.safetensors", "flux"),        # best quality/coherence
-    "illustrious": ("Illustrious-XL-v0.1.safetensors", "sdxl"),  # anime/illustration, strong characters
-    "juggernaut": ("Juggernaut-XL-v9.safetensors", "sdxl"),      # photoreal (people, products)
+    # Curated aliases -> (checkpoint filename, family, prompt_style). Friendly name + correct family +
+    # the quality-tag dialect the checkpoint was trained on (drives build_sdxl_prompts so callers needn't
+    # know it). `model` may ALSO be any checkpoint filename installed in ComfyUI (auto-discovered) — see
+    # resolve_model; raw filenames default to the 'pony' dialect (most uncensored SDXL is Pony-derived).
+    "pony":           ("ponyDiffusionV6XL.safetensors",      "sdxl", "pony"),         # fast, maximally uncensored (anime-lean)
+    "flux":           ("flux1-dev-fp8.safetensors",          "flux", "plain"),        # best quality/coherence
+    "illustrious":    ("Illustrious-XL-v0.1.safetensors",    "sdxl", "illustrious"),  # anime/illustration, strong characters
+    "juggernaut":     ("Juggernaut-XL-v9.safetensors",       "sdxl", "plain"),        # general photoreal (people, products)
+    "cyberrealistic": ("cyberrealisticPony_v18.safetensors", "sdxl", "pony"),         # PHOTOREAL NSFW — Pony-based, score-tag native
+    "bigasp":         ("bigaspV2.safetensors",               "sdxl", "plain"),        # PHOTOREAL NSFW — from-scratch SDXL, natural-language/booru
 }
 
 
@@ -364,16 +368,56 @@ def resolve_model(model: str) -> tuple[str, str]:
     A bare alias (no extension) that isn't curated is rejected; pass the actual .safetensors filename
     (see list_models for what each box has) to use a non-aliased model."""
     if model in LOCAL_MODELS:
-        return LOCAL_MODELS[model]
+        ckpt, family, _style = LOCAL_MODELS[model]
+        return ckpt, family
     if model.endswith((".safetensors", ".ckpt", ".sft")):
         return model, model_family(model)
     raise GenerationError(
         f"Unknown model '{model}'. Use a curated alias ({', '.join(LOCAL_MODELS)}) or an installed "
         f"checkpoint filename (e.g. Foo_v1.safetensors — see list_models).")
-# Pony responds to score tags; we prepend/append sensible defaults so callers needn't know them.
+
+
+def resolve_style(model: str) -> str:
+    """The quality-tag dialect to auto-apply for a model: 'pony' (score_9…), 'illustrious'
+    (masterpiece/booru quality tags), or 'plain' (no auto prefix — for from-scratch realistic models
+    like bigasp/juggernaut, where score tags only hurt). Raw (non-aliased) checkpoints default to
+    'pony', since most uncensored community SDXL checkpoints are Pony-derived and expect score tags."""
+    if model in LOCAL_MODELS:
+        return LOCAL_MODELS[model][2]
+    return "pony"
+
+
+# Each SDXL checkpoint family expects a different quality-tag dialect. We auto-apply the right one per
+# model (see resolve_style / build_sdxl_prompts) so callers needn't know it. An explicit negative_prompt
+# always wins, and a positive prompt that already opens with the dialect's signature tag is left as-is.
 PONY_POS_PREFIX = "score_9, score_8_up, score_7_up, "
 PONY_NEG_DEFAULT = ("score_6, score_5, score_4, worst quality, low quality, blurry, "
                     "jpeg artifacts, text, watermark, signature, deformed, extra limbs")
+# Illustrious / NoobAI (anime) use booru quality tags, NOT pony score tags.
+ILLUSTRIOUS_POS_PREFIX = "masterpiece, best quality, newest, absurdres, highres, "
+ILLUSTRIOUS_NEG_DEFAULT = ("worst quality, low quality, lowres, bad anatomy, bad hands, missing fingers, "
+                           "extra digit, jpeg artifacts, signature, watermark, text, blurry")
+# From-scratch realistic models (bigasp, juggernaut): no magic prefix — they respond to plain
+# natural-language / booru prompts; score tags only pollute them.
+GENERIC_NEG_DEFAULT = ("worst quality, low quality, blurry, jpeg artifacts, text, watermark, signature, "
+                       "deformed, bad anatomy, bad hands, extra limbs, mutated")
+
+
+def build_sdxl_prompts(model: str, prompt: str, negative_prompt: str | None) -> tuple[str, str]:
+    """Apply the model's quality-tag dialect to (prompt, negative_prompt) and return (positive, negative).
+    A caller-supplied negative_prompt is used verbatim; otherwise the dialect's default applies. If the
+    positive prompt already starts with the dialect's signature tag, it's left as-is (no double prefix)."""
+    style = resolve_style(model)
+    p = prompt.strip()
+    low = p.lower()
+    if style == "illustrious":
+        pos = p if low.startswith(("masterpiece", "best quality", "score_")) else ILLUSTRIOUS_POS_PREFIX + p
+        return pos, (negative_prompt or ILLUSTRIOUS_NEG_DEFAULT)
+    if style == "plain":
+        return p, (negative_prompt or GENERIC_NEG_DEFAULT)
+    # default dialect: pony (score tags)
+    pos = p if low.startswith("score_") else PONY_POS_PREFIX + p
+    return pos, (negative_prompt or PONY_NEG_DEFAULT)
 
 
 def _sdxl_workflow(ckpt, pos, neg, width, height, steps, cfg, seed):
@@ -584,9 +628,8 @@ async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt
     base = comfy_url.rstrip("/")
 
     if family == "sdxl":
-        pos = prompt if prompt.lower().startswith("score_") else PONY_POS_PREFIX + prompt
-        wf = _sdxl_workflow(ckpt, pos, negative_prompt or PONY_NEG_DEFAULT,
-                            width, height, steps or 28, cfg or 6.5, seed)
+        pos, neg = build_sdxl_prompts(model, prompt, negative_prompt)
+        wf = _sdxl_workflow(ckpt, pos, neg, width, height, steps or 28, cfg or 6.5, seed)
     else:  # flux
         wf = _flux_workflow(ckpt, prompt, width, height, steps or 20, seed, guidance)
 
@@ -660,7 +703,7 @@ async def call_comfy_ref(client, comfy_url, ref_images, prompt, *, model="pony",
     SDXL/pony family only. Returns [png_bytes]. Raises GenerationError on failure."""
     ckpt, family = resolve_model(model)
     if family != "sdxl":
-        raise GenerationError("Reference (IPAdapter) generation supports the SDXL family (pony/illustrious/juggernaut) only")
+        raise GenerationError("Reference (IPAdapter) generation supports the SDXL family (pony/cyberrealistic/illustrious/juggernaut/bigasp) only")
     if isinstance(ref_images, (bytes, bytearray)):
         ref_images = [ref_images]
     if not ref_images:
@@ -668,9 +711,9 @@ async def call_comfy_ref(client, comfy_url, ref_images, prompt, *, model="pony",
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
     base = comfy_url.rstrip("/")
-    pos = prompt if prompt.lower().startswith("score_") else PONY_POS_PREFIX + prompt
+    pos, neg = build_sdxl_prompts(model, prompt, negative_prompt)
     names = [await comfy_upload_image(client, base, b, f"forge_ref_{i}.png") for i, b in enumerate(ref_images)]
-    wf = _sdxl_ipadapter_workflow(ckpt, pos, negative_prompt or PONY_NEG_DEFAULT, width, height,
+    wf = _sdxl_ipadapter_workflow(ckpt, pos, neg, width, height,
                                   steps or 28, cfg or 6.5, seed, names, preset, weight, weight_type)
     q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": wf, "client_id": "forge"})
     pid = q.get("prompt_id")

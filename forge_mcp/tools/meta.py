@@ -55,7 +55,7 @@ def register(mcp, ctx):
                 if cks:
                     installed[b["label"]] = cks
         return {
-            "local_aliases": {a: {"checkpoint": c, "family": f} for a, (c, f) in g.LOCAL_MODELS.items()},
+            "local_aliases": {a: {"checkpoint": c, "family": f, "style": s} for a, (c, f, s) in g.LOCAL_MODELS.items()},
             "installed_checkpoints": installed,
             "local_video": list(g.LOCAL_VIDEO_MODELS.keys()),
             "background_removal": AVAILABLE_MODELS,
