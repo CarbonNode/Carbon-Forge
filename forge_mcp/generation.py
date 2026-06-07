@@ -573,7 +573,11 @@ def _wan_i2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps, i
     (LoadImage → Wan22ImageToVideoLatent.start_image), so the clip animates that still."""
     wf = _wan_t2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps)
     wf["15"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
-    wf["9"]["inputs"]["start_image"] = ["15", 0]
+    # Resize the start frame to the exact target dims, else Wan22ImageToVideoLatent encodes it at
+    # the image's own resolution and the latent dims mismatch the empty (length) latent it builds.
+    wf["16"] = {"class_type": "ImageScale", "inputs": {
+        "image": ["15", 0], "upscale_method": "lanczos", "width": width, "height": height, "crop": "center"}}
+    wf["9"]["inputs"]["start_image"] = ["16", 0]
     wf["14"]["inputs"]["filename_prefix"] = "forge_i2v"
     return wf
 
