@@ -473,6 +473,18 @@ LOCAL_VIDEO_MODELS = {
         "vae": "wan_2.1_vae.safetensors",
         "shift": 8.0, "cfg": 3.5, "steps": 20, "fps": 16,
     },
+    "wan-i2v-spicy": {  # uncensored i2v — wan-i2v experts + general-NSFW high/low LoRA pair (NSFW-22)
+        "capability": "video-wan-i2v",  # same base UNETs as wan-i2v (routing-equivalent) + LoRAs in models/loras
+        "high": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+        "low": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+        "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "clip_vision": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors",
+        "vae": "wan_2.1_vae.safetensors",
+        "lora_high": "NSFW-22-H-e8.safetensors",  # general-NSFW LoRA on the high-noise expert
+        "lora_low": "NSFW-22-L-e8.safetensors",   # general-NSFW LoRA on the low-noise expert
+        "lora_strength": 1.0,
+        "shift": 8.0, "cfg": 3.5, "steps": 20, "fps": 16,
+    },
 }
 WAN_NEG_DEFAULT = "blurry, low quality, static, distorted, watermark, text, jpeg artifacts"
 # aspect -> (w,h) at ~480p base (Wan upscales well; keep base modest for speed)
@@ -838,7 +850,7 @@ def _wan_i2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps, i
     which rewrites positive/negative conditioning AND builds the (wan_2.1 VAE, /8) latent at the right
     scale — so the KSamplers take their conditioning + latent from node 9's three outputs."""
     half = max(1, steps // 2)
-    return {
+    wf = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": spec["high"], "weight_dtype": "default"}},
         "2": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": spec["shift"]}},
         "3": {"class_type": "UNETLoader", "inputs": {"unet_name": spec["low"], "weight_dtype": "default"}},
@@ -859,14 +871,27 @@ def _wan_i2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps, i
         "13": {"class_type": "CreateVideo", "inputs": {"images": ["12", 0], "fps": float(fps)}},
         "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": "forge_i2v", "format": "mp4", "codec": "h264"}},
     }
+    # Optional LoRA pair (e.g. wan-i2v-spicy's NSFW-22 pair): splice LoraLoaderModelOnly between each
+    # UNETLoader and its ModelSamplingSD3 — matches Wan 2.2's high/low-noise expert split. Plain
+    # wan-i2v has no lora_* keys, so its graph is unchanged.
+    if spec.get("lora_high"):
+        wf["1L"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["1", 0], "lora_name": spec["lora_high"], "strength_model": spec.get("lora_strength", 1.0)}}
+        wf["2"]["inputs"]["model"] = ["1L", 0]
+    if spec.get("lora_low"):
+        wf["3L"] = {"class_type": "LoraLoaderModelOnly", "inputs": {"model": ["3", 0], "lora_name": spec["lora_low"], "strength_model": spec.get("lora_strength", 1.0)}}
+        wf["4"]["inputs"]["model"] = ["3L", 0]
+    return wf
 
 
-async def call_comfy_i2v(client, comfy_url, image_bytes, prompt, *, negative_prompt=None,
+async def call_comfy_i2v(client, comfy_url, image_bytes, prompt, *, model="wan-i2v", negative_prompt=None,
                          width=832, height=480, length=49, steps=None, seed=None, fps=None,
                          poll_seconds=900, free_after=True) -> bytes:
     """Animate a still into a video on a local ComfyUI box (Wan 2.2 I2V). image_bytes = the start
-    frame. Returns mp4 bytes. Raises GenerationError on failure."""
-    spec = LOCAL_VIDEO_MODELS["wan-i2v"]
+    frame. model: 'wan-i2v' (clean) or 'wan-i2v-spicy' (uncensored — adds the NSFW-22 LoRA pair).
+    Returns mp4 bytes. Raises GenerationError on failure."""
+    spec = LOCAL_VIDEO_MODELS.get(model)
+    if not spec or "clip_vision" not in spec:
+        raise GenerationError(f"'{model}' is not a Wan I2V model; use 'wan-i2v' or 'wan-i2v-spicy'")
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
     base = comfy_url.rstrip("/")
