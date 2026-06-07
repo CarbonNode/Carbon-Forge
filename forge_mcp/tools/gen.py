@@ -1,9 +1,34 @@
 """Generation tools — Imagen, Gemini edit, Veo (async jobs)."""
 import asyncio
+from io import BytesIO
 
+from backend.processing import PipelineOptions
+from forge_mcp import engine
 from forge_mcp import generation as g
 from forge_mcp import storage
 from forge_mcp import video
+
+# Icon-optimized prompt: clean centered subject on a flat solid background (so rembg cuts cleanly).
+ICON_TEMPLATE = (
+    "A single {subject} icon, {style}, bold simple shapes, clean thick outlines, "
+    "limited 2-3 color palette, centered with generous padding, front-on, no perspective, "
+    "no text, no watermark, flat solid #FFFFFF background, app-icon style, crisp high-contrast edges"
+)
+
+
+def _square_pad(data: bytes, size: int = 512, pad_frac: float = 0.12) -> bytes:
+    """Center a (already cut-out) image on a transparent square canvas with padding, sized to `size`."""
+    from PIL import Image
+    im = Image.open(BytesIO(data)).convert("RGBA")
+    inner = max(1, int(size * (1 - 2 * pad_frac)))
+    w, h = im.size
+    scale = inner / max(w, h)
+    im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    canvas.paste(im, ((size - im.width) // 2, (size - im.height) // 2), im)
+    buf = BytesIO()
+    canvas.save(buf, "PNG")
+    return buf.getvalue()
 
 # Aspect ratio -> (width, height) at SDXL/Flux-friendly resolutions for local generation.
 LOCAL_AR = {
@@ -284,6 +309,52 @@ def register(mcp, ctx):
     async def delete_character(name: str) -> dict:
         """Delete a saved character and its stored reference image."""
         return chars.delete(name)
+
+    @mcp.tool()
+    async def generate_icon(subject: str, project: str, style: str = "flat vector",
+                            model: str = "flux", size: int = 512, transparent: bool = True,
+                            seed: int | None = None, subpath: str | None = None,
+                            filename: str | None = None) -> dict:
+        """Generate a clean app/UI ICON in one shot: builds an icon-optimized prompt, renders the
+        subject centered on a solid white background, cuts it out to TRANSPARENT (rembg clean-cutout
+        recipe), and squares + pads to `size`. Great for connector/app icons, logos, game items.
+          subject: what the icon depicts (e.g. "a purple robot head", "a shopping cart").
+          style: 'flat vector' | '3D clay' | 'line art' | 'pixel art' | 'glassmorphism' | 'sticker' …
+          model: 'flux' / 'pony' (LOCAL, free, uncensored) | 'imagen' (cloud).
+          transparent: cut the background out to transparent (default true); false keeps the card.
+          size: output square px (default 512)."""
+        prompt = ICON_TEMPLATE.format(subject=subject, style=style)
+        raster = None
+        engine_str = None
+        if model in ("flux", "pony"):
+            backends = [
+                {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+                {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+            ]
+            chosen, sel = await g.select_comfy(ctx.http, backends)
+            if chosen:
+                try:
+                    raster = (await g.call_comfy(ctx.http, chosen, prompt, model=model,
+                                                 width=1024, height=1024, seed=seed))[0]
+                    engine_str = f"comfy:{model}@{sel}"
+                except g.GenerationError:
+                    raster = None
+        if raster is None:  # cloud fallback (or model='imagen')
+            _require_key()
+            raster = (await g.call_imagen(ctx.http, cfg.gemini_api_key,
+                                          g.resolve_image_model("imagen-4"), prompt,
+                                          sample_count=1, aspect_ratio="1:1"))[0]
+            engine_str = "imagen-4"
+        out = raster
+        if transparent:
+            opts = PipelineOptions(model="isnet-general-use", alpha_matting=True, edge_smooth=True,
+                                   auto_trim=True, color_remove=True, color_auto_detect=True)
+            out = await engine.run_pipeline(raster, opts)
+            out = _square_pad(out, size=size)
+        res = await storage.save_result(out, project=project, subpath=subpath,
+                                        filename=storage.safe_filename(filename or subject[:40]), ext="png", cfg=cfg)
+        res["engine"] = f"icon/{engine_str}"
+        return {"image": res, "engine": res["engine"], "prompt": prompt}
 
     async def _poll_and_finish(job_id: str, op: str):
         job = jobs.get(job_id)
