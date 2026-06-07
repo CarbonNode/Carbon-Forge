@@ -1,5 +1,6 @@
-"""Audio / TTS generation. ElevenLabs (cloud) now; local Chatterbox on the 4090
-ComfyUI boxes is wired in a follow-up (provider='chatterbox')."""
+"""Audio / TTS generation. Two providers: ElevenLabs (cloud, expressive, large voice
+library) and Chatterbox (local, on the 4090 GPU container(s) — free, on-prem, zero-shot
+voice cloning; primary→overflow routing, yields while gaming)."""
 
 from forge_mcp import generation as g
 from forge_mcp import storage
@@ -23,7 +24,8 @@ def register(mcp, ctx):
             Needs ELEVENLABS_API_KEY on the service. Use list_voices() to discover voice ids.
           - 'chatterbox' — local, on the 4090 GPU container(s); free, on-prem, zero-shot
             voice cloning + emotion control. Routes primary→overflow, yields while gaming.
-        voice: for elevenlabs = voice_id (default 'Rachel', see list_voices); for chatterbox =
+        voice: for elevenlabs = voice_id (omit → the account's own first voice, since free-tier
+          keys can't use Voice-Library voices; see list_voices); for chatterbox =
           a workspace path / URL to a reference clip to clone (omit for the default voice).
         model: ElevenLabs model_id (default eleven_multilingual_v2; 'eleven_turbo_v2_5' = low latency).
         stability / similarity_boost / style: ElevenLabs voice_settings (0..1).

@@ -223,6 +223,22 @@ DEFAULT_ELEVEN_MODEL = "eleven_multilingual_v2"      # high quality; eleven_turb
 DEFAULT_ELEVEN_VOICE = "21m00Tcm4TlvDq8ikWAM"        # "Rachel" — ElevenLabs' public default voice
 
 
+_default_voice_cache = None
+
+
+async def _default_eleven_voice(client, api_key) -> str:
+    """Free-tier accounts can't use Voice-Library voices via the API, so default to the
+    account's OWN first voice (cached) rather than a hardcoded library id like Rachel."""
+    global _default_voice_cache
+    if _default_voice_cache is None:
+        try:
+            voices = await list_elevenlabs_voices(client, api_key)
+            _default_voice_cache = voices[0]["voice_id"] if voices else DEFAULT_ELEVEN_VOICE
+        except GenerationError:
+            return DEFAULT_ELEVEN_VOICE
+    return _default_voice_cache
+
+
 async def call_elevenlabs(client, api_key, text, *, voice_id=None, model_id=None,
                           stability=0.5, similarity_boost=0.75, style=0.0,
                           output_format="mp3_44100_128", max_retries=3, retry_delay=1.0) -> bytes:
@@ -231,7 +247,7 @@ async def call_elevenlabs(client, api_key, text, *, voice_id=None, model_id=None
         raise GenerationError("ELEVENLABS_API_KEY is not configured on the forge service")
     if not (text or "").strip():
         raise GenerationError("text is required")
-    voice_id = voice_id or DEFAULT_ELEVEN_VOICE
+    voice_id = voice_id or await _default_eleven_voice(client, api_key)
     model_id = model_id or DEFAULT_ELEVEN_MODEL
     url = f"{ELEVENLABS_API}/text-to-speech/{voice_id}"
     body = {"text": text, "model_id": model_id,
