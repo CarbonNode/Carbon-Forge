@@ -262,6 +262,59 @@ def _flux_workflow(ckpt, pos, width, height, steps, seed, guidance=3.5):
     }
 
 
+# --- Local VIDEO (Wan 2.2 14B T2V, native ComfyUI nodes — workflow verified live) ---
+LOCAL_VIDEO_MODELS = {
+    # alias -> spec. `requires` lists the model files a box must have to serve this (used for
+    # capability auto-detection in the gen-pool, so a box only gets video jobs it can run).
+    "wan": {
+        "capability": "video-wan",
+        "high": "wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors",
+        "low": "wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors",
+        "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "vae": "wan_2.1_vae.safetensors",
+        "shift": 8.0, "cfg": 3.5, "steps": 20, "fps": 16,
+    },
+}
+WAN_NEG_DEFAULT = "blurry, low quality, static, distorted, watermark, text, jpeg artifacts"
+# aspect -> (w,h) at ~480p base (Wan upscales well; keep base modest for speed)
+VIDEO_AR = {"1:1": (512, 512), "16:9": (832, 480), "9:16": (480, 832), "4:3": (640, 480), "3:4": (480, 640)}
+
+
+def _wan_t2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps):
+    """Wan 2.2 two-expert (high→low noise) T2V graph. Mirrors the live-validated workflow."""
+    half = max(1, steps // 2)
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": spec["high"], "weight_dtype": "default"}},
+        "2": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": spec["shift"]}},
+        "3": {"class_type": "UNETLoader", "inputs": {"unet_name": spec["low"], "weight_dtype": "default"}},
+        "4": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["3", 0], "shift": spec["shift"]}},
+        "5": {"class_type": "CLIPLoader", "inputs": {"clip_name": spec["clip"], "type": "wan"}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": pos, "clip": ["5", 0]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": neg, "clip": ["5", 0]}},
+        "8": {"class_type": "VAELoader", "inputs": {"vae_name": spec["vae"]}},
+        "9": {"class_type": "Wan22ImageToVideoLatent", "inputs": {"vae": ["8", 0], "width": width, "height": height, "length": length, "batch_size": 1}},
+        "10": {"class_type": "KSamplerAdvanced", "inputs": {"model": ["2", 0], "add_noise": "enable", "noise_seed": seed, "steps": steps, "cfg": spec["cfg"], "sampler_name": "euler", "scheduler": "simple", "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["9", 0], "start_at_step": 0, "end_at_step": half, "return_with_leftover_noise": "enable"}},
+        "11": {"class_type": "KSamplerAdvanced", "inputs": {"model": ["4", 0], "add_noise": "disable", "noise_seed": seed, "steps": steps, "cfg": spec["cfg"], "sampler_name": "euler", "scheduler": "simple", "positive": ["6", 0], "negative": ["7", 0], "latent_image": ["10", 0], "start_at_step": half, "end_at_step": steps, "return_with_leftover_noise": "disable"}},
+        "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["8", 0]}},
+        "13": {"class_type": "CreateVideo", "inputs": {"images": ["12", 0], "fps": float(fps)}},
+        "14": {"class_type": "SaveVideo", "inputs": {"video": ["13", 0], "filename_prefix": "forge_video", "format": "mp4", "codec": "h264"}},
+    }
+
+
+async def comfy_has_models(client, comfy_url, unet_names, timeout=5.0) -> bool:
+    """Capability auto-detection: does this box's ComfyUI have the given diffusion models?
+    Queries the single-node schema (lightweight) and checks the unet_name enum. Lets the pool
+    route a video job only to boxes that actually have the model — and a new box auto-qualifies
+    the moment its models are synced, no config change."""
+    try:
+        d = (await client.get(f"{comfy_url.rstrip('/')}/object_info/UNETLoader", timeout=timeout)).json()
+        opts = d.get("UNETLoader", {}).get("input", {}).get("required", {}).get("unet_name", [[]])[0]
+        have = set(opts if isinstance(opts, list) else [])
+        return all(n in have for n in unet_names)
+    except (httpx.HTTPError, ValueError, KeyError):
+        return False
+
+
 async def comfy_reachable(client, comfy_url, timeout=4.0) -> bool:
     try:
         r = await client.get(f"{comfy_url.rstrip('/')}/system_stats", timeout=timeout)
@@ -293,13 +346,13 @@ async def box_gaming(client, presence_url, timeout=3.0) -> bool:
         return False
 
 
-async def select_comfy(client, backends) -> tuple[str | None, str]:
+async def select_comfy(client, backends, require_unets=None) -> tuple[str | None, str]:
     """Pick a ComfyUI backend for a new local gen, honoring the routing policy:
     primary first, overflow only when primary is busy; never a box being gamed on.
     `backends` = ordered list of {url, presence_url, label} (highest priority first).
-    Returns (url, label) or (None, reason). Prefers a NON-busy reachable box (that's the
-    overflow-when-primary-busy behavior); if all reachable boxes are busy, uses the
-    highest-priority reachable one and lets ComfyUI queue it (still better than cloud)."""
+    `require_unets` = optional list of diffusion-model filenames the box must have (capability
+    gate — e.g. the Wan video models, so video only routes to boxes that can run it; a box
+    auto-qualifies once its models are synced). Returns (url, label) or (None, reason)."""
     reachable = []
     for b in backends:
         if not b.get("url"):
@@ -308,6 +361,8 @@ async def select_comfy(client, backends) -> tuple[str | None, str]:
             continue
         if await box_gaming(client, b.get("presence_url", "")):
             continue  # skip a box someone is gaming on
+        if require_unets and not await comfy_has_models(client, b["url"], require_unets):
+            continue  # box lacks the required model (e.g. no Wan video models yet)
         reachable.append(b)
     for b in reachable:
         if not await comfy_busy(client, b["url"]):
@@ -367,3 +422,46 @@ async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt
     if r.status_code != 200 or not r.content:
         raise GenerationError(f"ComfyUI image fetch failed: HTTP {r.status_code}")
     return [r.content]
+
+
+async def call_comfy_video(client, comfy_url, prompt, *, model="wan", negative_prompt=None,
+                           width=512, height=512, length=49, steps=None, seed=None, fps=None,
+                           poll_seconds=900) -> bytes:
+    """Generate a video on a local ComfyUI box (Wan 2.2 T2V). Returns mp4 bytes. Raises
+    GenerationError on failure (so the tool can fall back to cloud Veo)."""
+    spec = LOCAL_VIDEO_MODELS.get(model)
+    if not spec:
+        raise GenerationError(f"Unknown local video model '{model}'. Use: {', '.join(LOCAL_VIDEO_MODELS)}")
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    base = comfy_url.rstrip("/")
+    wf = _wan_t2v_workflow(spec, prompt, negative_prompt or WAN_NEG_DEFAULT,
+                           width, height, length, steps or spec["steps"], seed, fps or spec["fps"])
+    q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": wf, "client_id": "forge"})
+    pid = q.get("prompt_id")
+    if not pid:
+        raise GenerationError(f"ComfyUI rejected the video workflow: {str(q)[:400]}")
+    out = None
+    for _ in range(poll_seconds):
+        await asyncio.sleep(1.0)
+        try:
+            rec = (await client.get(f"{base}/history/{pid}")).json().get(pid)
+        except (httpx.HTTPError, ValueError):
+            continue
+        if not rec:
+            continue
+        for node in (rec.get("outputs") or {}).values():
+            if node.get("images"):
+                out = node["images"][0]; break
+        if out:
+            break
+        st = rec.get("status") or {}
+        if st.get("status_str") == "error":
+            raise GenerationError(f"ComfyUI video error: {str(st.get('messages') or st)[:400]}")
+    if not out:
+        raise GenerationError("ComfyUI video generation timed out")
+    r = await client.get(f"{base}/view", params={
+        "filename": out["filename"], "subfolder": out.get("subfolder", ""), "type": out.get("type", "output")})
+    if r.status_code != 200 or not r.content:
+        raise GenerationError(f"ComfyUI video fetch failed: HTTP {r.status_code}")
+    return r.content
