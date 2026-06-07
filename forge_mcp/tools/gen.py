@@ -322,6 +322,81 @@ def register(mcp, ctx):
         return {"job_id": job["id"], "status": "running",
                 "note": "Local I2V (Wan 2.2) takes a few minutes. Poll with job_status."}
 
+    async def _run_clip_job(job_id, prompt, img_model, motion_prompt, iw, ih, vw, vh,
+                            length, steps, seed, fps, neg, do_upscale):
+        try:
+            backends = [
+                {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+                {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+            ]
+            job = jobs.get(job_id)
+            base = storage.safe_filename(job["filename"] or prompt[:40])
+            results = []
+            # 1) still
+            jobs.update(job_id, message="generating still…")
+            chosen, sel = await g.select_comfy(ctx.http, backends)
+            if not chosen:
+                raise g.GenerationError(f"No GPU backend for the still ({sel})")
+            stills = await g.call_comfy(ctx.http, chosen, prompt, model=img_model,
+                                        negative_prompt=neg, width=iw, height=ih, seed=seed)
+            still_bytes = stills[0]
+            still_res = await storage.save_result(still_bytes, project=job["project"], subpath=job["subpath"],
+                                                  filename=base, ext="png", cfg=cfg)
+            still_res["engine"] = f"comfy:{img_model}@{sel}"; still_res["kind"] = "still"
+            results.append(still_res)
+            # 2) optional 4x upscale -> hi-res STILL deliverable
+            if do_upscale:
+                jobs.update(job_id, message="upscaling still…", results=results)
+                uc, usel = await g.select_comfy(ctx.http, backends)
+                if uc:
+                    up = await g.call_comfy_upscale(ctx.http, uc, still_bytes)
+                    up_res = await storage.save_result(up, project=job["project"], subpath=job["subpath"],
+                                                       filename=f"{base}_4x", ext="png", cfg=cfg)
+                    up_res["engine"] = f"esrgan-4x@{usel}"; up_res["kind"] = "upscaled"
+                    results.append(up_res)
+            # 3) animate the (target-res) still -> video
+            jobs.update(job_id, message="animating…", results=results)
+            spec = g.LOCAL_VIDEO_MODELS["wan-i2v"]
+            vc, vsel = await g.select_comfy(ctx.http, backends, require_unets=[spec["high"], spec["low"]])
+            if not vc:
+                raise g.GenerationError(f"No I2V backend for the clip ({vsel})")
+            mp4 = await g.call_comfy_i2v(ctx.http, vc, still_bytes, motion_prompt, negative_prompt=neg,
+                                         width=vw, height=vh, length=length, steps=steps, seed=seed, fps=fps)
+            vid_res = await storage.save_result(mp4, project=job["project"], subpath=job["subpath"],
+                                                filename=base, ext="mp4", cfg=cfg)
+            vid_res["engine"] = f"wan-i2v@{vsel}"; vid_res["kind"] = "video"
+            results.append(vid_res)
+            jobs.update(job_id, status="done", message=f"complete (still@{sel} -> video@{vsel})", results=results)
+        except Exception as e:
+            jobs.update(job_id, status="failed", error=str(e))
+
+    @mcp.tool()
+    async def generate_clip(prompt: str, project: str, img_model: str = "pony",
+                            aspect_ratio: str = "16:9", seconds: float = 3.0,
+                            motion_prompt: str | None = None, upscale: bool = False,
+                            negative_prompt: str | None = None, steps: int | None = None,
+                            seed: int | None = None, subpath: str | None = None,
+                            filename: str | None = None) -> dict:
+        """One-shot ASSET PIPELINE: generate a still from `prompt`, optionally 4x-upscale it, then
+        ANIMATE it into a video (Wan 2.2 I2V) — all LOCAL on the GPU pool, uncensored & free. Returns
+        a job_id immediately; poll job_status (results carry the still, the upscaled still if
+        upscale=True, and the video, each tagged with `kind`).
+          img_model: pony (fast) | flux (best quality). aspect_ratio: 1:1,3:4,4:3,9:16,16:9. seconds: ~2-5.
+          motion_prompt: optional camera/motion guidance for the animation (defaults to `prompt`).
+        Note: upscale gives a hi-res STILL; the clip's resolution is set by aspect_ratio (Wan resizes the
+        start frame), so upscaling doesn't raise the video's resolution."""
+        iw, ih = LOCAL_AR.get(aspect_ratio, (896, 1152))
+        vw, vh = g.VIDEO_AR.get(aspect_ratio, (832, 480))
+        fps = g.LOCAL_VIDEO_MODELS["wan-i2v"]["fps"]
+        length = max(17, int(round(seconds * fps / 4)) * 4 + 1)
+        storage.validate_project(project, cfg=cfg)
+        job = jobs.create(kind="clip", model="wan-i2v", prompt=prompt, project=project,
+                          subpath=subpath, filename=filename)
+        asyncio.create_task(_run_clip_job(job["id"], prompt, img_model, motion_prompt or prompt,
+                                          iw, ih, vw, vh, length, steps, seed, fps, negative_prompt, upscale))
+        return {"job_id": job["id"], "status": "running",
+                "note": "Asset pipeline (still -> " + ("upscale -> " if upscale else "") + "animate). Poll job_status."}
+
     async def _run_montage_job(job_id, shots, neg, w, h, length, steps, fps):
         try:
             spec = g.LOCAL_VIDEO_MODELS["wan"]
