@@ -173,6 +173,26 @@ def register(mcp, ctx):
                                                      filename=name, ext="png", cfg=cfg))
         return {"count": len(results), "images": results}
 
+    @mcp.tool()
+    async def upscale_image(image: str, project: str, subpath: str | None = None,
+                            filename: str | None = None) -> dict:
+        """Upscale an image ~4x on a local GPU box (ESRGAN) — uncensored, free. image: an https URL or
+        a '<Project>/<path>' workspace path. Routes across the pool (skips boxes being gamed-on / running
+        chim) and frees the card after. Great for finishing a fast small gen at high resolution."""
+        src = await storage.resolve_input(image, cfg=cfg, kind="image")
+        backends = [
+            {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+            {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+        ]
+        chosen, sel = await g.select_comfy(ctx.http, backends)
+        if not chosen:
+            raise g.GenerationError(f"No GPU backend available to upscale ({sel})")
+        up = await g.call_comfy_upscale(ctx.http, chosen, src.data)
+        res = await storage.save_result(up, project=project, subpath=subpath,
+                                        filename=storage.safe_filename(filename or "upscaled"), ext="png", cfg=cfg)
+        res["engine"] = f"esrgan-4x@{sel}"
+        return {"image": res, "engine": res["engine"]}
+
     async def _poll_and_finish(job_id: str, op: str):
         job = jobs.get(job_id)
         sample = await g.poll_veo(ctx.http, cfg.gemini_api_key, op,
@@ -259,6 +279,48 @@ def register(mcp, ctx):
         asyncio.create_task(_run_local_video_job(job["id"], prompt, negative_prompt, w, h, length, steps, seed, fps))
         return {"job_id": job["id"], "status": "running",
                 "note": "Local video (Wan 2.2) takes a few minutes. Poll with job_status."}
+
+    async def _run_i2v_job(job_id, image_bytes, prompt, neg, w, h, length, steps, seed, fps):
+        try:
+            backends = [
+                {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+                {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+            ]
+            spec = g.LOCAL_VIDEO_MODELS["wan-i2v"]
+            chosen, sel = await g.select_comfy(ctx.http, backends, require_unets=[spec["high"], spec["low"]])
+            if not chosen:
+                raise g.GenerationError(f"No I2V backend available ({sel}) — all busy/gaming or lacking the Wan I2V models")
+            jobs.update(job_id, message=f"animating on {sel}…")
+            mp4 = await g.call_comfy_i2v(ctx.http, chosen, image_bytes, prompt, negative_prompt=neg,
+                                         width=w, height=h, length=length, steps=steps, seed=seed, fps=fps)
+            job = jobs.get(job_id)
+            res = await storage.save_result(mp4, project=job["project"], subpath=job["subpath"],
+                                            filename=job["filename"] or "i2v", ext="mp4", cfg=cfg)
+            jobs.update(job_id, status="done", message=f"complete (engine=wan-i2v@{sel})", results=[res])
+        except Exception as e:
+            jobs.update(job_id, status="failed", error=str(e))
+
+    @mcp.tool()
+    async def animate_image(image: str, project: str, prompt: str = "", aspect_ratio: str = "16:9",
+                            seconds: float = 3.0, negative_prompt: str | None = None,
+                            steps: int | None = None, seed: int | None = None,
+                            subpath: str | None = None, filename: str | None = None) -> dict:
+        """Animate a still IMAGE into a video LOCALLY via ComfyUI + Wan 2.2 I2V — FULLY UNCENSORED,
+        FREE. image: an https URL or a '<Project>/<path>' workspace path (e.g. a fresh generate_image
+        output, or anything in Carbon Drive). prompt: optional motion/camera guidance ("slow zoom in,
+        hair blowing"). Routes across the gen-pool, skipping any box being gamed-on / running chim.
+        Takes a few minutes — returns a job_id immediately; poll with job_status.
+        aspect_ratio: 1:1, 16:9, 9:16, 4:3, 3:4. seconds: clip length (~2-5)."""
+        src = await storage.resolve_input(image, cfg=cfg, kind="image")
+        w, h = g.VIDEO_AR.get(aspect_ratio, (832, 480))
+        fps = g.LOCAL_VIDEO_MODELS["wan-i2v"]["fps"]
+        length = max(17, int(round(seconds * fps / 4)) * 4 + 1)  # Wan wants 4n+1 frames
+        storage.validate_project(project, cfg=cfg)
+        job = jobs.create(kind="wan-i2v", model="wan-i2v", prompt=prompt or "(animate)", project=project,
+                          subpath=subpath, filename=filename)
+        asyncio.create_task(_run_i2v_job(job["id"], src.data, prompt, negative_prompt, w, h, length, steps, seed, fps))
+        return {"job_id": job["id"], "status": "running",
+                "note": "Local I2V (Wan 2.2) takes a few minutes. Poll with job_status."}
 
     async def _run_montage_job(job_id, shots, neg, w, h, length, steps, fps):
         try:

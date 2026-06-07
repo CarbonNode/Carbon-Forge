@@ -274,6 +274,14 @@ LOCAL_VIDEO_MODELS = {
         "vae": "wan_2.1_vae.safetensors",
         "shift": 8.0, "cfg": 3.5, "steps": 20, "fps": 16,
     },
+    "wan-i2v": {  # image-to-video (animate a still) — separate I2V-trained experts
+        "capability": "video-wan-i2v",
+        "high": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
+        "low": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors",
+        "clip": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
+        "vae": "wan_2.1_vae.safetensors",
+        "shift": 8.0, "cfg": 3.5, "steps": 20, "fps": 16,
+    },
 }
 WAN_NEG_DEFAULT = "blurry, low quality, static, distorted, watermark, text, jpeg artifacts"
 # aspect -> (w,h) at ~480p base (Wan upscales well; keep base modest for speed)
@@ -453,6 +461,68 @@ async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt
     return [r.content]
 
 
+async def comfy_upload_image(client, comfy_url, data, filename="forge_input.png") -> str:
+    """Upload image bytes into a ComfyUI box's input dir; returns the server-side name for LoadImage."""
+    r = await client.post(f"{comfy_url.rstrip('/')}/upload/image",
+                          files={"image": (filename, data, "image/png")},
+                          data={"type": "input", "overwrite": "true"}, timeout=30)
+    if r.status_code != 200:
+        raise GenerationError(f"ComfyUI image upload failed: HTTP {r.status_code}")
+    return r.json().get("name", filename)
+
+
+def _upscale_workflow(image_name, model_name="RealESRGAN_x4plus.pth"):
+    return {
+        "1": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "2": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": model_name}},
+        "3": {"class_type": "ImageUpscaleWithModel", "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+        "4": {"class_type": "SaveImage", "inputs": {"filename_prefix": "forge_upscale", "images": ["3", 0]}},
+    }
+
+
+async def _comfy_poll_image(client, base, pid, poll_seconds, what) -> bytes:
+    """Shared submit-result poll: wait for prompt `pid`'s first image output, fetch its bytes."""
+    out = None
+    for _ in range(poll_seconds):
+        await asyncio.sleep(1.0)
+        try:
+            rec = (await client.get(f"{base}/history/{pid}")).json().get(pid)
+        except (httpx.HTTPError, ValueError):
+            continue
+        if not rec:
+            continue
+        for node in (rec.get("outputs") or {}).values():
+            if node.get("images"):
+                out = node["images"][0]; break
+        if out:
+            break
+        st = rec.get("status") or {}
+        if st.get("status_str") == "error":
+            raise GenerationError(f"ComfyUI {what} error: {str(st.get('messages') or st)[:300]}")
+    if not out:
+        raise GenerationError(f"ComfyUI {what} timed out")
+    r = await client.get(f"{base}/view", params={
+        "filename": out["filename"], "subfolder": out.get("subfolder", ""), "type": out.get("type", "output")})
+    if r.status_code != 200 or not r.content:
+        raise GenerationError(f"ComfyUI {what} fetch failed: HTTP {r.status_code}")
+    return r.content
+
+
+async def call_comfy_upscale(client, comfy_url, image_bytes, *, model_name="RealESRGAN_x4plus.pth",
+                             poll_seconds=180, free_after=True) -> bytes:
+    """Upscale an image ~4x on a local ComfyUI box (ESRGAN). Returns png bytes. Raises GenerationError."""
+    base = comfy_url.rstrip("/")
+    name = await comfy_upload_image(client, base, image_bytes)
+    q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": _upscale_workflow(name, model_name), "client_id": "forge"})
+    pid = q.get("prompt_id")
+    if not pid:
+        raise GenerationError(f"ComfyUI rejected upscale workflow: {str(q)[:300]}")
+    data = await _comfy_poll_image(client, base, pid, poll_seconds, "upscale")
+    if free_after:
+        await comfy_free(client, base)
+    return data
+
+
 async def call_comfy_video(client, comfy_url, prompt, *, model="wan", negative_prompt=None,
                            width=512, height=512, length=49, steps=None, seed=None, fps=None,
                            poll_seconds=900, free_after=True) -> bytes:
@@ -496,3 +566,35 @@ async def call_comfy_video(client, comfy_url, prompt, *, model="wan", negative_p
     if free_after:
         await comfy_free(client, base)  # hand the card back to chim/games after the gen
     return r.content
+
+
+def _wan_i2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps, image_name):
+    """Wan 2.2 two-expert I2V graph — like T2V but the latent is seeded from a start image
+    (LoadImage → Wan22ImageToVideoLatent.start_image), so the clip animates that still."""
+    wf = _wan_t2v_workflow(spec, pos, neg, width, height, length, steps, seed, fps)
+    wf["15"] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
+    wf["9"]["inputs"]["start_image"] = ["15", 0]
+    wf["14"]["inputs"]["filename_prefix"] = "forge_i2v"
+    return wf
+
+
+async def call_comfy_i2v(client, comfy_url, image_bytes, prompt, *, negative_prompt=None,
+                         width=832, height=480, length=49, steps=None, seed=None, fps=None,
+                         poll_seconds=900, free_after=True) -> bytes:
+    """Animate a still into a video on a local ComfyUI box (Wan 2.2 I2V). image_bytes = the start
+    frame. Returns mp4 bytes. Raises GenerationError on failure."""
+    spec = LOCAL_VIDEO_MODELS["wan-i2v"]
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    base = comfy_url.rstrip("/")
+    name = await comfy_upload_image(client, base, image_bytes, "forge_i2v_start.png")
+    wf = _wan_i2v_workflow(spec, prompt, negative_prompt or WAN_NEG_DEFAULT,
+                           width, height, length, steps or spec["steps"], seed, fps or spec["fps"], name)
+    q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": wf, "client_id": "forge"})
+    pid = q.get("prompt_id")
+    if not pid:
+        raise GenerationError(f"ComfyUI rejected the I2V workflow: {str(q)[:400]}")
+    data = await _comfy_poll_image(client, base, pid, poll_seconds, "i2v")
+    if free_after:
+        await comfy_free(client, base)
+    return data
