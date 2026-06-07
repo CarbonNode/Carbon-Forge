@@ -237,6 +237,31 @@ def register(mcp, ctx):
         res["engine"] = f"esrgan-4x@{sel}"
         return {"image": res, "engine": res["engine"]}
 
+    @mcp.tool()
+    async def edit_local(image: str, instruction: str, project: str, steps: int | None = None,
+                         seed: int | None = None, guidance: float | None = None,
+                         subpath: str | None = None, filename: str | None = None) -> dict:
+        """Edit an image by a text INSTRUCTION, LOCALLY + uncensored, via Flux Kontext — e.g. "make the
+        jacket red", "remove the person on the left", "change the background to a snowy mountain",
+        "turn it into night". image: an https URL or a '<Project>/<path>' workspace path. Routes across
+        the GPU pool (only boxes that have the Kontext model; skips boxes being gamed-on / running chim).
+        guidance ~2.5 (higher = follow the instruction more literally). This is the local/uncensored
+        counterpart to edit_image (which uses cloud Gemini)."""
+        src = await storage.resolve_input(image, cfg=cfg, kind="image")
+        backends = [
+            {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+            {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+        ]
+        chosen, sel = await g.select_comfy(ctx.http, backends, require_unets=[g.FLUX_KONTEXT["unet"]])
+        if not chosen:
+            raise g.GenerationError(f"No GPU backend with Flux Kontext available ({sel})")
+        out = await g.call_comfy_kontext(ctx.http, chosen, src.data, instruction,
+                                         steps=steps, seed=seed, guidance=guidance)
+        res = await storage.save_result(out, project=project, subpath=subpath,
+                                        filename=storage.safe_filename(filename or "edited"), ext="png", cfg=cfg)
+        res["engine"] = f"kontext@{sel}"
+        return {"image": res, "engine": res["engine"]}
+
     async def _resolve_reference(character, reference_image, mode, weight):
         """Returns (ref_images, mode, weight) from EITHER a saved character name (all its stored
         references, averaged) OR a one-off reference_image (URL/workspace path). Saved-character

@@ -881,3 +881,57 @@ async def call_comfy_i2v(client, comfy_url, image_bytes, prompt, *, negative_pro
     if free_after:
         await comfy_free(client, base)
     return data
+
+
+# --- Local instruction EDITING (Flux Kontext dev, native ComfyUI) ---
+FLUX_KONTEXT = {
+    "unet": "flux1-dev-kontext_fp8_scaled.safetensors",   # diffusion_models/
+    "clip_l": "clip_l.safetensors",                        # text_encoders/
+    "t5": "t5xxl_fp8_e4m3fn.safetensors",                  # text_encoders/
+    "vae": "ae.safetensors",                               # vae/ (flux autoencoder)
+    "guidance": 2.5, "steps": 20,
+}
+
+
+def _flux_kontext_workflow(spec, instruction, image_name, steps, seed, guidance):
+    """Flux Kontext edit graph: VAE-encode the input image, attach it as a ReferenceLatent to the
+    instruction conditioning, and denoise — so the model edits the image per the text instruction.
+    Mirrors the native ComfyUI Kontext template (DualCLIPLoader flux + FluxKontextImageScale +
+    ReferenceLatent + FluxGuidance)."""
+    return {
+        "1": {"class_type": "UNETLoader", "inputs": {"unet_name": spec["unet"], "weight_dtype": "default"}},
+        "2": {"class_type": "DualCLIPLoader", "inputs": {"clip_name1": spec["clip_l"], "clip_name2": spec["t5"], "type": "flux"}},
+        "3": {"class_type": "VAELoader", "inputs": {"vae_name": spec["vae"]}},
+        "4": {"class_type": "CLIPTextEncode", "inputs": {"text": instruction, "clip": ["2", 0]}},
+        "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["2", 0]}},
+        "6": {"class_type": "LoadImage", "inputs": {"image": image_name}},
+        "7": {"class_type": "FluxKontextImageScale", "inputs": {"image": ["6", 0]}},
+        "8": {"class_type": "VAEEncode", "inputs": {"pixels": ["7", 0], "vae": ["3", 0]}},
+        "9": {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["4", 0], "latent": ["8", 0]}},
+        "10": {"class_type": "FluxGuidance", "inputs": {"conditioning": ["9", 0], "guidance": guidance}},
+        "11": {"class_type": "KSampler", "inputs": {
+            "model": ["1", 0], "positive": ["10", 0], "negative": ["5", 0], "latent_image": ["8", 0],
+            "seed": seed, "steps": steps, "cfg": 1.0, "sampler_name": "euler", "scheduler": "simple", "denoise": 1.0}},
+        "12": {"class_type": "VAEDecode", "inputs": {"samples": ["11", 0], "vae": ["3", 0]}},
+        "13": {"class_type": "SaveImage", "inputs": {"filename_prefix": "forge_kontext", "images": ["12", 0]}},
+    }
+
+
+async def call_comfy_kontext(client, comfy_url, image_bytes, instruction, *, steps=None, seed=None,
+                             guidance=None, poll_seconds=300, free_after=True) -> bytes:
+    """Edit an image by text instruction on a local ComfyUI box (Flux Kontext). Returns png bytes.
+    Raises GenerationError on failure."""
+    spec = FLUX_KONTEXT
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    base = comfy_url.rstrip("/")
+    name = await comfy_upload_image(client, base, image_bytes, "forge_kontext_src.png")
+    wf = _flux_kontext_workflow(spec, instruction, name, steps or spec["steps"], seed, guidance or spec["guidance"])
+    q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": wf, "client_id": "forge"})
+    pid = q.get("prompt_id")
+    if not pid:
+        raise GenerationError(f"ComfyUI rejected the Kontext workflow: {str(q)[:400]}")
+    data = await _comfy_poll_image(client, base, pid, poll_seconds, "kontext")
+    if free_after:
+        await comfy_free(client, base)
+    return data
