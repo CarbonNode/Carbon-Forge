@@ -1,0 +1,5 @@
+# Chatterbox TTS service. torch/torchaudio come from the CUDA base image (Dockerfile.chatterbox);
+# chatterbox-tts pulls its pinned transformers==4.46.3 etc. — isolated in this container.
+chatterbox-tts
+fastapi
+uvicorn[standard]

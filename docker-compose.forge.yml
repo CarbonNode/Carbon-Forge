@@ -18,9 +18,25 @@ services:
       - workspace:/workspace
     restart: unless-stopped
 
+  # Isolated Chatterbox TTS on the GPU (own container — no ComfyUI dep conflict).
+  # Forge routes generate_speech(provider='chatterbox') here; same primary/overflow
+  # pattern as ComfyUI (this is the laybackrig primary; maingamingrig runs its own).
+  chatterbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.chatterbox
+    image: carbon-forge-chatterbox
+    ports:
+      - "5126:5126"
+    volumes:
+      - chatterbox-models:/models   # HF cache so the model downloads once
+    gpus: all
+    restart: unless-stopped
+
 volumes:
   forge-models:
   forge-results:
+  chatterbox-models:
   workspace:
     driver: local
     driver_opts:

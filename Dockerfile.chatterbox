@@ -1,0 +1,17 @@
+# Isolated Chatterbox TTS GPU service. A CUDA+torch base provides the GPU torch so
+# chatterbox-tts (and its pinned transformers==4.46.3) install cleanly here, fully
+# separate from ComfyUI's embedded Python (which is on transformers 5.9 / torch 2.12).
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ffmpeg libsndfile1 && rm -rf /var/lib/apt/lists/*
+
+COPY chatterbox_service/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY chatterbox_service/server.py .
+
+ENV HF_HOME=/models
+EXPOSE 5126
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "5126"]
