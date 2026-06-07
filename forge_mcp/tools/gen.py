@@ -203,15 +203,16 @@ def register(mcp, ctx):
         return {"image": res, "engine": res["engine"]}
 
     async def _resolve_reference(character, reference_image, mode, weight):
-        """Returns (ref_bytes, mode, weight) from EITHER a saved character name OR a one-off
-        reference_image (URL/workspace path). Saved-character defaults fill in mode/weight when unset."""
+        """Returns (ref_images, mode, weight) from EITHER a saved character name (all its stored
+        references, averaged) OR a one-off reference_image (URL/workspace path). Saved-character
+        defaults fill in mode/weight when unset."""
         if character:
-            ref_bytes, entry = chars.read_reference(character)
-            return ref_bytes, (mode or entry.get("mode") or "character"), \
+            ref_list, entry = chars.read_references(character)
+            return ref_list, (mode or entry.get("mode") or "character"), \
                 (weight if weight is not None else entry.get("weight", 0.8))
         if reference_image:
             src = await storage.resolve_input(reference_image, cfg=cfg, kind="image")
-            return src.data, (mode or "character"), (weight if weight is not None else 0.8)
+            return [src.data], (mode or "character"), (weight if weight is not None else 0.8)
         raise g.GenerationError("Provide either `character` (a saved name) or `reference_image`")
 
     @mcp.tool()
@@ -230,7 +231,7 @@ def register(mcp, ctx):
           mode: 'character' (subject + style) | 'face' (portrait, face-locked) | 'style' (style only).
           weight: 0.4-1.2 — how strongly to follow the reference (lower = more prompt freedom).
           aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9."""
-        ref_bytes, mode, weight = await _resolve_reference(character, reference_image, mode, weight)
+        ref_images, mode, weight = await _resolve_reference(character, reference_image, mode, weight)
         w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
         preset, weight_type = _ipa_preset(mode)
         backends = [
@@ -240,7 +241,7 @@ def register(mcp, ctx):
         chosen, sel = await g.select_comfy(ctx.http, backends)
         if not chosen:
             raise g.GenerationError(f"No GPU backend available for reference gen ({sel})")
-        imgs = await g.call_comfy_ref(ctx.http, chosen, ref_bytes, prompt, model="pony", preset=preset,
+        imgs = await g.call_comfy_ref(ctx.http, chosen, ref_images, prompt, model="pony", preset=preset,
                                       weight=weight, weight_type=weight_type, negative_prompt=negative_prompt,
                                       width=w, height=h, steps=steps, seed=seed)
         res = await storage.save_result(imgs[0], project=project, subpath=subpath,
@@ -262,6 +263,15 @@ def register(mcp, ctx):
         saved = chars.save(name=name, data=src.data, ext=ext, description=description, mode=mode,
                            weight=weight, source=reference_image, dims=dims if dims[0] else None)
         return {"saved": saved}
+
+    @mcp.tool()
+    async def add_character_reference(name: str, reference_image: str) -> dict:
+        """Add ANOTHER reference image to an existing saved character (e.g. a second/third angle or
+        expression). More references = a stronger, more robust likeness — the IPAdapter path averages
+        their embeds. reference_image: https URL or '<Project>/<path>'."""
+        src = await storage.resolve_input(reference_image, cfg=cfg, kind="image")
+        ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}.get(src.mime, "png")
+        return {"character": chars.add_reference(name=name, data=src.data, ext=ext)}
 
     @mcp.tool()
     async def list_characters() -> dict:
@@ -406,7 +416,7 @@ def register(mcp, ctx):
 
     async def _run_clip_job(job_id, prompt, img_model, motion_prompt, iw, ih, vw, vh,
                             length, steps, seed, fps, neg, do_upscale,
-                            char_ref=None, char_mode=None, char_weight=None):
+                            char_refs=None, char_mode=None, char_weight=None):
         try:
             backends = [
                 {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
@@ -420,9 +430,9 @@ def register(mcp, ctx):
             chosen, sel = await g.select_comfy(ctx.http, backends)
             if not chosen:
                 raise g.GenerationError(f"No GPU backend for the still ({sel})")
-            if char_ref is not None:
+            if char_refs:
                 preset, wt = _ipa_preset(char_mode)
-                stills = await g.call_comfy_ref(ctx.http, chosen, char_ref, prompt, model="pony",
+                stills = await g.call_comfy_ref(ctx.http, chosen, char_refs, prompt, model="pony",
                                                 preset=preset, weight=char_weight, weight_type=wt,
                                                 negative_prompt=neg, width=iw, height=ih, seed=seed)
                 sel = f"{sel}/ipadapter-{char_mode}"
@@ -480,10 +490,9 @@ def register(mcp, ctx):
           aspect_ratio: 1:1,3:4,4:3,9:16,16:9. seconds: ~2-5. motion_prompt: motion/camera guidance.
         Note: upscale gives a hi-res STILL; the clip's resolution is set by aspect_ratio (Wan resizes the
         start frame), so upscaling doesn't raise the video's resolution."""
-        char_ref = char_mode = char_weight = None
+        char_refs = char_mode = char_weight = None
         if character:
-            ref_bytes, entry = chars.read_reference(character)  # raises if unknown
-            char_ref = ref_bytes
+            char_refs, entry = chars.read_references(character)  # raises if unknown
             char_mode = character_mode or entry.get("mode") or "character"
             char_weight = character_weight if character_weight is not None else entry.get("weight", 0.8)
         iw, ih = LOCAL_AR.get(aspect_ratio, (896, 1152))
@@ -495,7 +504,7 @@ def register(mcp, ctx):
                           subpath=subpath, filename=filename)
         asyncio.create_task(_run_clip_job(job["id"], prompt, img_model, motion_prompt or prompt,
                                           iw, ih, vw, vh, length, steps, seed, fps, negative_prompt, upscale,
-                                          char_ref=char_ref, char_mode=char_mode, char_weight=char_weight))
+                                          char_refs=char_refs, char_mode=char_mode, char_weight=char_weight))
         return {"job_id": job["id"], "status": "running",
                 "note": "Asset pipeline (" + (f"character:{character} -> " if character else "")
                 + "still -> " + ("upscale -> " if upscale else "") + "animate). Poll job_status."}
