@@ -408,6 +408,11 @@ def resolve_lora(name: str) -> str:
         f"filename (see list_models -> local_loras.installed).")
 
 
+# Default Ultralytics bbox detector for the ADetailer face-restore pass (see _add_face_detailer). Defined
+# here (before call_comfy) so it can be a signature default. Any bbox/*.pt installed on the box works.
+DEFAULT_FACE_DETECTOR = "bbox/face_yolov8m.pt"
+
+
 # Each SDXL checkpoint family expects a different quality-tag dialect. We auto-apply the right one per
 # model (see resolve_style / build_sdxl_prompts) so callers needn't know it. An explicit negative_prompt
 # always wins, and a positive prompt that already opens with the dialect's signature tag is left as-is.
@@ -702,10 +707,12 @@ async def eligible_comfy_backends(client, backends, require_unets=None, require_
 
 async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt=None,
                      width=832, height=1216, steps=None, cfg=None, seed=None,
-                     guidance=3.5, loras=None, poll_seconds=240, free_after=True) -> list:
+                     guidance=3.5, loras=None, face_detail=False, face_detector=DEFAULT_FACE_DETECTOR,
+                     poll_seconds=240, free_after=True) -> list:
     """Generate one image on the local ComfyUI box. Returns [png_bytes]. Raises GenerationError
     (so the tool can fall back to cloud) on any failure. loras: optional list of (filename, strength)
-    SDXL LoRAs spliced into the graph (ignored for the Flux family)."""
+    SDXL LoRAs spliced into the graph (ignored for the Flux family). face_detail: run an ADetailer
+    face-restore pass (SDXL only; needs the Impact Pack nodes + a bbox detector on the box)."""
     ckpt, family = resolve_model(model)
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
@@ -714,6 +721,11 @@ async def call_comfy(client, comfy_url, prompt, *, model="pony", negative_prompt
     if family == "sdxl":
         pos, neg = build_sdxl_prompts(model, prompt, negative_prompt)
         wf = _sdxl_workflow(ckpt, pos, neg, width, height, steps or 28, cfg or 6.5, seed, loras=loras)
+        if face_detail:  # detect + high-res inpaint faces through the same (LoRA'd) model/clip/vae
+            _add_face_detailer(wf, image_ref=["8", 0], model_ref=wf["3"]["inputs"]["model"],
+                               clip_ref=wf["6"]["inputs"]["clip"], vae_ref=["10", 0],
+                               pos_ref=["6", 0], neg_ref=["7", 0], detector=face_detector,
+                               seed=seed, steps=steps or 28, cfg=cfg or 6.5)
     else:  # flux
         wf = _flux_workflow(ckpt, prompt, width, height, steps or 20, seed, guidance)
 
@@ -780,10 +792,38 @@ def _sdxl_ipadapter_workflow(ckpt, pos, neg, width, height, steps, cfg, seed, re
     return wf
 
 
+# ADetailer-style face restore (Impact Pack). After the base render, detect faces (Ultralytics bbox
+# model in models/ultralytics/bbox) and re-render each one cropped at high resolution through the SAME
+# model/clip/vae/conditioning, compositing the sharper face back — the single biggest quality lift on
+# full-body / multi-subject SDXL shots, where faces otherwise come out small and mushy. Needs the
+# ComfyUI-Impact-Pack + ComfyUI-Impact-Subpack custom nodes + a bbox/*.pt detector on the box.
+def _add_face_detailer(wf, *, image_ref, model_ref, clip_ref, vae_ref, pos_ref, neg_ref,
+                       detector=DEFAULT_FACE_DETECTOR, seed=0, steps=28, cfg=6.5, denoise=0.45):
+    """Splice UltralyticsDetectorProvider + FaceDetailer onto an existing SDXL graph and repoint the
+    SaveImage (node '9') to the detailed image. Uses the SAME model/clip/vae/conditioning as the base
+    gen, so a LoRA chain or IPAdapter (model_ref already points at them) carries into the face inpaint —
+    keeping a character's face on a refined, high-detail render. Node ids 50/51 (outside the base range)."""
+    wf["50"] = {"class_type": "UltralyticsDetectorProvider", "inputs": {"model_name": detector}}
+    wf["51"] = {"class_type": "FaceDetailer", "inputs": {
+        "image": image_ref, "model": model_ref, "clip": clip_ref, "vae": vae_ref,
+        "positive": pos_ref, "negative": neg_ref, "bbox_detector": ["50", 0],
+        "guide_size": 512, "guide_size_for": True, "max_size": 1024,
+        "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": "dpmpp_2m_sde", "scheduler": "karras",
+        "denoise": denoise, "feather": 5, "noise_mask": True, "force_inpaint": True,
+        "bbox_threshold": 0.5, "bbox_dilation": 10, "bbox_crop_factor": 3.0,
+        "sam_detection_hint": "center-1", "sam_dilation": 0, "sam_threshold": 0.93,
+        "sam_bbox_expansion": 0, "sam_mask_hint_threshold": 0.7, "sam_mask_hint_use_negative": "False",
+        "drop_size": 10, "wildcard": "", "cycle": 1}}
+    if "9" in wf:  # repoint SaveImage to the face-detailed output
+        wf["9"]["inputs"]["images"] = ["51", 0]
+    return ["51", 0]
+
+
 async def call_comfy_ref(client, comfy_url, ref_images, prompt, *, model="pony",
                          preset="PLUS (high strength)", weight=0.8, weight_type="linear",
                          negative_prompt=None, width=832, height=1216, steps=None, cfg=None,
-                         seed=None, loras=None, poll_seconds=240, free_after=True) -> list:
+                         seed=None, loras=None, face_detail=False, face_detector=DEFAULT_FACE_DETECTOR,
+                         poll_seconds=240, free_after=True) -> list:
     """Generate an image conditioned on REFERENCE image(s) via IPAdapter (character/face/style
     consistency). ref_images: bytes or a list of bytes (multiple angles → averaged likeness).
     SDXL/pony family only. Returns [png_bytes]. Raises GenerationError on failure."""
@@ -801,6 +841,11 @@ async def call_comfy_ref(client, comfy_url, ref_images, prompt, *, model="pony",
     names = [await comfy_upload_image(client, base, b, f"forge_ref_{i}.png") for i, b in enumerate(ref_images)]
     wf = _sdxl_ipadapter_workflow(ckpt, pos, neg, width, height,
                                   steps or 28, cfg or 6.5, seed, names, preset, weight, weight_type, loras=loras)
+    if face_detail:  # FaceDetailer reuses the IPAdapter'd model (wf['3'] model) → keeps the character's face
+        _add_face_detailer(wf, image_ref=["8", 0], model_ref=wf["3"]["inputs"]["model"],
+                           clip_ref=wf["6"]["inputs"]["clip"], vae_ref=["10", 0],
+                           pos_ref=["6", 0], neg_ref=["7", 0], detector=face_detector,
+                           seed=seed, steps=steps or 28, cfg=cfg or 6.5)
     q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": wf, "client_id": "forge"})
     pid = q.get("prompt_id")
     if not pid:

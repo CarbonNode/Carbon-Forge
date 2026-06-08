@@ -97,7 +97,8 @@ def register(mcp, ctx):
                              aspect_ratio: str = "3:4", steps: int | None = None,
                              cfg_scale: float | None = None, negative_prompt: str | None = None,
                              seed: int | None = None, lora: str | None = None,
-                             lora_strength: float = 1.0, fallback: bool = True,
+                             lora_strength: float = 1.0, face_detail: bool = False,
+                             fallback: bool = True,
                              subpath: str | None = None, filename: str | None = None) -> dict:
         """Generate an image LOCALLY on the GPU box via ComfyUI — FULLY UNCENSORED (dark/gore/adult
         OK; no cloud content filter). Saves into the project's workspace folder.
@@ -108,7 +109,9 @@ def register(mcp, ctx):
         The model's quality-tag dialect + a sane negative prompt are auto-applied (override via negative_prompt).
         If the GPU box is unreachable/busy and fallback=True, falls back to cloud Imagen 4 (filtered).
         lora: optional SDXL LoRA — a curated alias OR an installed .safetensors filename (see
-        list_models -> local_loras); lora_strength ~0.6-1.0. SDXL models only; ignored on cloud fallback."""
+        list_models -> local_loras); lora_strength ~0.6-1.0. SDXL models only; ignored on cloud fallback.
+        face_detail: run an ADetailer face-restore pass (detect + high-res inpaint each face) — a big
+        quality lift on full-body / group shots where faces come out small; SDXL only, adds ~10-20s."""
         w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
         loras = [(g.resolve_lora(lora), lora_strength)] if lora else None
         engine = f"comfy:{model}"
@@ -130,11 +133,12 @@ def register(mcp, ctx):
                     req_ckpt = None
             chosen_url, sel = await g.select_comfy(ctx.http, backends, require_checkpoints=req_ckpt)
             if chosen_url:
-                engine = f"comfy:{model}{('+lora:' + lora) if lora else ''}@{sel}"
+                engine = f"comfy:{model}{('+lora:' + lora) if lora else ''}{'+facedetail' if face_detail else ''}@{sel}"
                 try:
                     images = await g.call_comfy(ctx.http, chosen_url, prompt, model=model,
                                                 negative_prompt=negative_prompt, width=w, height=h,
-                                                steps=steps, cfg=cfg_scale, seed=seed, loras=loras)
+                                                steps=steps, cfg=cfg_scale, seed=seed, loras=loras,
+                                                face_detail=face_detail)
                 except g.GenerationError as e:
                     reason = str(e)
             else:
@@ -285,8 +289,8 @@ def register(mcp, ctx):
                                       weight: float | None = None, aspect_ratio: str = "3:4",
                                       negative_prompt: str | None = None, steps: int | None = None,
                                       seed: int | None = None, lora: str | None = None,
-                                      lora_strength: float = 1.0, subpath: str | None = None,
-                                      filename: str | None = None) -> dict:
+                                      lora_strength: float = 1.0, face_detail: bool = False,
+                                      subpath: str | None = None, filename: str | None = None) -> dict:
         """Generate an image that KEEPS the character / face / style of a reference (IPAdapter) — LOCAL
         on the GPU pool, uncensored. Use it for the SAME character across scenes/poses, a consistent
         mascot, or transferring an art style. SDXL/pony only.
@@ -296,6 +300,7 @@ def register(mcp, ctx):
           mode: 'character' (subject + style) | 'face' (portrait, face-locked) | 'style' (style only).
           weight: 0.4-1.2 — how strongly to follow the reference (lower = more prompt freedom).
           lora: optional SDXL LoRA (curated alias or installed filename; see list_models) applied on top.
+          face_detail: ADetailer face-restore pass (sharper face, keeps the character) — recommended for portraits.
           aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9."""
         ref_images, mode, weight = await _resolve_reference(character, reference_image, mode, weight)
         w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
@@ -310,10 +315,11 @@ def register(mcp, ctx):
             raise g.GenerationError(f"No GPU backend available for reference gen ({sel})")
         imgs = await g.call_comfy_ref(ctx.http, chosen, ref_images, prompt, model="pony", preset=preset,
                                       weight=weight, weight_type=weight_type, negative_prompt=negative_prompt,
-                                      width=w, height=h, steps=steps, seed=seed, loras=loras)
+                                      width=w, height=h, steps=steps, seed=seed, loras=loras,
+                                      face_detail=face_detail)
         res = await storage.save_result(imgs[0], project=project, subpath=subpath,
                                         filename=storage.safe_filename(filename or prompt[:40]), ext="png", cfg=cfg)
-        res["engine"] = f"ipadapter-{mode}{('+lora:' + lora) if lora else ''}@{sel}"
+        res["engine"] = f"ipadapter-{mode}{('+lora:' + lora) if lora else ''}{'+facedetail' if face_detail else ''}@{sel}"
         return {"image": res, "engine": res["engine"], "mode": mode, "character": character}
 
     @mcp.tool()
