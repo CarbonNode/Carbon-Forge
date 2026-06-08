@@ -323,6 +323,47 @@ def register(mcp, ctx):
         return {"image": res, "engine": res["engine"], "mode": mode, "character": character}
 
     @mcp.tool()
+    async def generate_with_face(prompt: str, project: str, reference_image: str | None = None,
+                                 character: str | None = None, model: str = "cyberrealistic",
+                                 weight: float = 0.8, aspect_ratio: str = "3:4",
+                                 negative_prompt: str | None = None, steps: int | None = None,
+                                 seed: int | None = None, face_detail: bool = False,
+                                 subpath: str | None = None, filename: str | None = None) -> dict:
+        """Generate an image with the EXACT FACE of a reference person (InstantID) — a far stronger identity
+        lock than generate_with_reference's IPAdapter 'face' mode. Use for a recurring character who must look
+        like the SAME person across every scene, pose, and outfit. LOCAL + uncensored; SDXL only (photoreal
+        models like cyberrealistic / bigasp shine). Give a clear, mostly front-on face photo.
+          character: a SAVED character name (its stored reference is used as the face) OR
+          reference_image: a one-off https URL / '<Project>/<path>' workspace path.
+          model: an SDXL alias/checkpoint (default cyberrealistic). weight: 0.6-1.0 identity strength
+            (higher = closer to the reference face, less prompt freedom).
+          face_detail: add an ADetailer pass for extra face sharpness (keeps the InstantID identity).
+          aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9."""
+        if character:
+            ref_list, _entry = chars.read_references(character)  # raises if unknown
+            face_bytes = ref_list[0]
+        elif reference_image:
+            src = await storage.resolve_input(reference_image, cfg=cfg, kind="image")
+            face_bytes = src.data
+        else:
+            raise g.GenerationError("Provide either `character` (a saved name) or `reference_image`")
+        w, h = LOCAL_AR.get(aspect_ratio, (896, 1152))
+        backends = [
+            {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+            {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url, "label": "maingamingrig"},
+        ]
+        chosen, sel = await g.select_comfy(ctx.http, backends)
+        if not chosen:
+            raise g.GenerationError(f"No GPU backend available for InstantID ({sel})")
+        imgs = await g.call_comfy_instantid(ctx.http, chosen, face_bytes, prompt, model=model,
+                                            negative_prompt=negative_prompt, ip_weight=weight,
+                                            width=w, height=h, steps=steps, seed=seed, face_detail=face_detail)
+        res = await storage.save_result(imgs[0], project=project, subpath=subpath,
+                                        filename=storage.safe_filename(filename or prompt[:40]), ext="png", cfg=cfg)
+        res["engine"] = f"instantid:{model}{'+facedetail' if face_detail else ''}@{sel}"
+        return {"image": res, "engine": res["engine"], "character": character}
+
+    @mcp.tool()
     async def save_character(name: str, reference_image: str, description: str | None = None,
                              mode: str = "character", weight: float = 0.8) -> dict:
         """Save a named CHARACTER from a reference image, so you can reuse it by name (consistent

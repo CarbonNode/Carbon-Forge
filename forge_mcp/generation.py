@@ -1084,3 +1084,73 @@ async def call_comfy_kontext(client, comfy_url, image_bytes, instruction, *, ste
     if free_after:
         await comfy_free(client, base)
     return data
+
+
+# --- InstantID: face-EXACT identity (ComfyUI_InstantID custom node) ---
+# A far stronger identity lock than IPAdapter: an InsightFace (antelopev2) embedding of the reference face
+# + an InstantID ControlNet steer the SDXL gen to render the SAME person across any scene/pose/outfit.
+# Needs (on the box): the ComfyUI_InstantID node, insightface + onnxruntime, models/instantid/ip-adapter.bin,
+# the InstantID ControlNet in models/controlnet, and antelopev2 in models/insightface/models/antelopev2.
+DEFAULT_INSTANTID_CONTROLNET = "instantid_diffusion_pytorch_model.safetensors"
+DEFAULT_INSTANTID_FILE = "ip-adapter.bin"
+
+
+def _instantid_workflow(ckpt, pos, neg, width, height, steps, cfg, seed, face_image_name,
+                        controlnet_name=DEFAULT_INSTANTID_CONTROLNET, instantid_file=DEFAULT_INSTANTID_FILE,
+                        ip_weight=0.8, start_at=0.0, end_at=1.0, provider="CPU"):
+    """SDXL graph driven by InstantID: ApplyInstantID patches the model + conditioning from a face
+    embedding (InstantIDFaceAnalysis) + the InstantID ControlNet, so the rendered face matches the
+    reference. Node ids 60-64 for the InstantID chain (outside the base graph's range). Verified against
+    live /object_info: ApplyInstantID(instantid, insightface, control_net, image, model, positive,
+    negative, weight, start_at, end_at) -> (MODEL, positive, negative)."""
+    return {
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
+        "10": {"class_type": "VAELoader", "inputs": {"vae_name": "sdxl_vae.safetensors"}},
+        "6": {"class_type": "CLIPTextEncode", "inputs": {"text": pos, "clip": ["4", 1]}},
+        "7": {"class_type": "CLIPTextEncode", "inputs": {"text": neg, "clip": ["4", 1]}},
+        "5": {"class_type": "EmptyLatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+        "60": {"class_type": "InstantIDModelLoader", "inputs": {"instantid_file": instantid_file}},
+        "61": {"class_type": "InstantIDFaceAnalysis", "inputs": {"provider": provider}},
+        "62": {"class_type": "ControlNetLoader", "inputs": {"control_net_name": controlnet_name}},
+        "63": {"class_type": "LoadImage", "inputs": {"image": face_image_name}},
+        "64": {"class_type": "ApplyInstantID", "inputs": {
+            "instantid": ["60", 0], "insightface": ["61", 0], "control_net": ["62", 0],
+            "image": ["63", 0], "model": ["4", 0], "positive": ["6", 0], "negative": ["7", 0],
+            "weight": ip_weight, "start_at": start_at, "end_at": end_at}},
+        "3": {"class_type": "KSampler", "inputs": {
+            "seed": seed, "steps": steps, "cfg": cfg, "sampler_name": "dpmpp_2m_sde",
+            "scheduler": "karras", "denoise": 1.0,
+            "model": ["64", 0], "positive": ["64", 1], "negative": ["64", 2], "latent_image": ["5", 0]}},
+        "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["10", 0]}},
+        "9": {"class_type": "SaveImage", "inputs": {"filename_prefix": "forge_instantid", "images": ["8", 0]}},
+    }
+
+
+async def call_comfy_instantid(client, comfy_url, face_image_bytes, prompt, *, model="cyberrealistic",
+                               negative_prompt=None, controlnet_name=DEFAULT_INSTANTID_CONTROLNET,
+                               ip_weight=0.8, width=832, height=1216, steps=None, cfg=None, seed=None,
+                               face_detail=False, poll_seconds=300, free_after=True) -> list:
+    """Generate an image with the EXACT face of a reference (InstantID). SDXL only. face_image_bytes =
+    a clear, mostly front-on photo of the person. Returns [png_bytes]. Raises GenerationError."""
+    ckpt, family = resolve_model(model)
+    if family != "sdxl":
+        raise GenerationError("InstantID supports the SDXL family (pony/cyberrealistic/bigasp/illustrious/juggernaut) only")
+    if seed is None:
+        seed = random.randint(0, 2**32 - 1)
+    base = comfy_url.rstrip("/")
+    pos, neg = build_sdxl_prompts(model, prompt, negative_prompt)
+    name = await comfy_upload_image(client, base, face_image_bytes, "forge_face.png")
+    wf = _instantid_workflow(ckpt, pos, neg, width, height, steps or 30, cfg or 5.0, seed, name,
+                             controlnet_name=controlnet_name, ip_weight=ip_weight)
+    if face_detail:  # keep the InstantID face (ApplyInstantID model, node 64) in the detail pass
+        _add_face_detailer(wf, image_ref=["8", 0], model_ref=["64", 0], clip_ref=["4", 1],
+                           vae_ref=["10", 0], pos_ref=["64", 1], neg_ref=["64", 2],
+                           seed=seed, steps=steps or 30, cfg=cfg or 5.0)
+    q = await fetch_json(client, f"{base}/prompt", json_body={"prompt": wf, "client_id": "forge"})
+    pid = q.get("prompt_id")
+    if not pid:
+        raise GenerationError(f"ComfyUI rejected the InstantID workflow: {str(q)[:400]}")
+    data = await _comfy_poll_image(client, base, pid, poll_seconds, "instantid")
+    if free_after:
+        await comfy_free(client, base)
+    return [data]
