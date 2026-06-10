@@ -1,21 +1,24 @@
 import asyncio
+import dataclasses
 import os
 import time
 
 import pytest
 
 from forge_mcp import storage
-from forge_mcp.config import Config
+from forge_mcp.config import load_config
 
 
 def make_cfg(tmp_path):
-    return Config(
-        host="0.0.0.0", port=5125, token="t", gemini_api_key="",
+    # Built on load_config() defaults so a new Config field can't break this fixture again
+    # (the fixed kwarg list here went stale every time Config grew).
+    return dataclasses.replace(
+        load_config(),
+        token="t",
         workspace_root=str(tmp_path / "ws"),
         workspace_display_root="C:\\Workspace",
         results_root=str(tmp_path / "results"),
         public_url="https://forge.example.com",
-        cache_ttl_days=30, max_image_mb=50, max_video_mb=500,
     )
 
 
