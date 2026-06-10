@@ -21,11 +21,16 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
   storage.py      # input resolution (URL | '<Project>/<path>'), dual-write results, URL minting, janitor
   generation.py   # Imagen 4 / Gemini image / Veo + ElevenLabs TTS + local ComfyUI (SDXL/Flux/Wan/ESRGAN)
   jobs.py         # persistent Veo job registry (/results/jobs.json), restart resume
-  video.py        # ffmpeg trim/frames/convert
+  video.py        # ffmpeg wrappers: video trim/frames/convert + audio convert/trim + ffprobe
+  imaging.py      # Pillow format conversion (image_convert — plain convert/resize, no AI)
+  assets3d.py     # GLB helpers: Draco compression (gltf-transform CLI, node in image) + stats
   engine.py       # async bridge to backend.processing (CPU semaphore, model-load lock)
-  tools/          # MCP tool definitions: proc, gen, vid, audio, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, saved characters, audio TTS, batch/montage, generate_clip pipeline)
+  tools/          # MCP tool definitions: proc, gen, vid, audio, extract, util, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, saved characters, audio TTS, batch/montage, generate_clip pipeline)
                   #   audio.py = generate_speech / list_voices. TWO TTS providers:
                   #   ElevenLabs (cloud) + Chatterbox (local, isolated GPU container, see below)
+                  #   util.py = quick conversions: audio_convert / audio_trim / image_convert /
+                  #   draco_compress (.glb) / media_info — chat uploads are workspace paths
+                  #   ('<Project>/.conduit/uploads/<name>'), so they feed straight in
 tests/            # pytest (26 tests) + manual_* live-smoke clients
 Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 ```

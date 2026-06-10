@@ -1,5 +1,7 @@
-"""ffmpeg wrappers — trim, frame extraction, conversion. Bytes in -> bytes out via temp files."""
+"""ffmpeg wrappers — video trim/frames/convert, audio convert/trim, ffprobe.
+Bytes in -> bytes out via temp files."""
 import asyncio
+import json
 import os
 import re
 import tempfile
@@ -181,3 +183,126 @@ async def convert(data: bytes, fmt, *, crf=None, scale=None, in_ext="mp4") -> by
     finally:
         src.cleanup()
         dst.cleanup()
+
+
+# --- audio ---------------------------------------------------------------
+
+# format -> (ffmpeg codec, default bitrate kbps for lossy; None = lossless/uncompressed)
+AUDIO_CODECS = {
+    "mp3": ("libmp3lame", 192),
+    "wav": ("pcm_s16le", None),
+    "ogg": ("libvorbis", 160),
+    "opus": ("libopus", 96),
+    "flac": ("flac", None),
+    "m4a": ("aac", 192),
+}
+
+
+def build_audio_convert_cmd(inp, outp, fmt, *, bitrate_kbps=None, sample_rate_hz=None, channels=None):
+    if fmt not in AUDIO_CODECS:
+        raise VideoError(f"Unsupported audio format '{fmt}' ({', '.join(AUDIO_CODECS)})")
+    codec, default_kbps = AUDIO_CODECS[fmt]
+    cmd = ["ffmpeg", "-y", "-i", inp, "-vn", "-c:a", codec]
+    kbps = bitrate_kbps or default_kbps
+    if kbps and default_kbps is not None:  # bitrate only makes sense for lossy codecs
+        cmd += ["-b:a", f"{int(kbps)}k"]
+    if sample_rate_hz:
+        cmd += ["-ar", str(int(sample_rate_hz))]
+    if channels:
+        cmd += ["-ac", str(int(channels))]
+    return cmd + [outp]
+
+
+def build_audio_trim_cmd(inp, outp, start_s, end_s, *, codec):
+    cmd = ["ffmpeg", "-y", "-ss", str(start_s), "-to", str(end_s), "-i", inp, "-vn"]
+    cmd += ["-c:a", "copy"] if codec is None else ["-c:a", codec]
+    return cmd + [outp]
+
+
+async def audio_convert(data: bytes, fmt, *, bitrate_kbps=None, sample_rate_hz=None,
+                        channels=None, in_ext="mp3") -> bytes:
+    src, dst = _Tmp(f".{in_ext}", data), _Tmp(f".{fmt}")
+    try:
+        await _run(build_audio_convert_cmd(src.path, dst.path, fmt, bitrate_kbps=bitrate_kbps,
+                                           sample_rate_hz=sample_rate_hz, channels=channels))
+        out = dst.read()
+        if not out:
+            raise VideoError("Audio conversion produced an empty file")
+        return out
+    finally:
+        src.cleanup()
+        dst.cleanup()
+
+
+async def audio_trim(data: bytes, start, end, *, in_ext="mp3", out_ext=None) -> bytes:
+    start_s, end_s = to_seconds(start), to_seconds(end)
+    if end_s <= start_s:
+        raise VideoError(f"end ({end_s}s) must be after start ({start_s}s)")
+    out_ext = out_ext or in_ext
+    src, dst = _Tmp(f".{in_ext}", data), _Tmp(f".{out_ext}")
+    try:
+        out = b""
+        if out_ext == in_ext:  # same container: try lossless stream copy first
+            try:
+                await _run(build_audio_trim_cmd(src.path, dst.path, start_s, end_s, codec=None))
+                out = dst.read()
+            except VideoError:
+                out = b""
+        if len(out) < 256:  # copy failed or container change -> re-encode
+            codec, _ = AUDIO_CODECS.get(out_ext, AUDIO_CODECS["mp3"])
+            await _run(build_audio_trim_cmd(src.path, dst.path, start_s, end_s, codec=codec))
+            out = dst.read()
+        if len(out) < 256:
+            raise VideoError("Trim produced an empty file")
+        return out
+    finally:
+        src.cleanup()
+        dst.cleanup()
+
+
+# --- ffprobe -------------------------------------------------------------
+
+async def probe(data: bytes, in_ext="bin") -> dict:
+    """Raw ffprobe JSON (format + streams) for any audio/video file."""
+    src = _Tmp(f".{in_ext}", data)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-print_format", "json",
+            "-show_format", "-show_streams", src.path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise VideoError("ffprobe timed out after 60s")
+        if proc.returncode != 0:
+            tail = (stderr or b"").decode(errors="replace")[-400:]
+            raise VideoError(f"ffprobe could not read this file: {tail}")
+        return json.loads(stdout.decode(errors="replace") or "{}")
+    finally:
+        src.cleanup()
+
+
+def summarize_probe(raw: dict) -> dict:
+    """Curate ffprobe output down to what a chat answer needs."""
+    fmt = raw.get("format", {})
+    out = {
+        "container": fmt.get("format_name"),
+        "duration_s": round(float(fmt["duration"]), 2) if fmt.get("duration") else None,
+        "bit_rate": int(fmt["bit_rate"]) if fmt.get("bit_rate") else None,
+        "streams": [],
+    }
+    for s in raw.get("streams", []):
+        entry = {"type": s.get("codec_type"), "codec": s.get("codec_name")}
+        if s.get("codec_type") == "video":
+            entry["width"], entry["height"] = s.get("width"), s.get("height")
+            fr = s.get("avg_frame_rate") or ""
+            if "/" in fr:
+                num, den = fr.split("/", 1)
+                if num.isdigit() and den.isdigit() and int(den):
+                    entry["fps"] = round(int(num) / int(den), 2)
+        elif s.get("codec_type") == "audio":
+            entry["sample_rate"] = int(s["sample_rate"]) if s.get("sample_rate") else None
+            entry["channels"] = s.get("channels")
+        out["streams"].append(entry)
+    return out

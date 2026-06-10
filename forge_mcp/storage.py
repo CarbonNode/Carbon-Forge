@@ -30,11 +30,19 @@ class ResolvedInput:
 _MAGIC = [
     (b"\x89PNG\r\n\x1a\n", "image/png"),
     (b"\xff\xd8\xff", "image/jpeg"),
-    (b"RIFF", "image/webp"),       # checked further below
     (b"GIF8", "image/gif"),
     (b"BM", "image/bmp"),
     (b"\x1a\x45\xdf\xa3", "video/webm"),
+    (b"ID3", "audio/mpeg"),
+    (b"\xff\xfb", "audio/mpeg"),   # bare mp3 frame sync (no ID3 tag)
+    (b"\xff\xf3", "audio/mpeg"),
+    (b"\xff\xf2", "audio/mpeg"),
+    (b"OggS", "audio/ogg"),        # vorbis or opus — ffmpeg sorts it out
+    (b"fLaC", "audio/flac"),
+    (b"glTF", "model/gltf-binary"),
 ]
+
+_RIFF = {b"WEBP": "image/webp", b"WAVE": "audio/wav", b"AVI ": "video/x-msvideo"}
 
 
 def sniff_mime(data: bytes):
@@ -42,11 +50,13 @@ def sniff_mime(data: bytes):
         return None
     for magic, mime in _MAGIC:
         if data.startswith(magic):
-            if mime == "image/webp" and data[8:12] != b"WEBP":
-                continue
             return mime
-    if data[4:8] == b"ftyp":  # mp4 / mov family
+    if data.startswith(b"RIFF"):
+        return _RIFF.get(data[8:12])
+    if data[4:8] == b"ftyp":  # ISO base-media family: mp4 / mov / m4a
         brand = data[8:12]
+        if brand in (b"M4A ", b"M4B "):
+            return "audio/mp4"
         return "video/quicktime" if brand in (b"qt  ",) else "video/mp4"
     return None
 
@@ -57,6 +67,14 @@ def is_image_mime(mime):
 
 def is_video_mime(mime):
     return bool(mime) and mime.startswith("video/")
+
+
+def is_audio_mime(mime):
+    return bool(mime) and mime.startswith("audio/")
+
+
+def is_model_mime(mime):
+    return mime == "model/gltf-binary"
 
 
 def _workspace_abs(rel: str, cfg: Config) -> str:
@@ -114,6 +132,13 @@ async def resolve_input(ref: str, *, cfg: Config, kind: str = "image") -> Resolv
         raise StorageError(f"Input from '{ref}' is not a recognized image (png/jpg/webp/gif/bmp)")
     if kind == "video" and not is_video_mime(mime):
         raise StorageError(f"Input from '{ref}' is not a recognized video (mp4/webm/mov)")
+    if kind == "audio" and not (is_audio_mime(mime) or is_video_mime(mime)):
+        raise StorageError(
+            f"Input from '{ref}' is not a recognized audio or video file "
+            f"(mp3/wav/ogg/flac/m4a or mp4/webm/mov)")
+    if kind == "model" and not is_model_mime(mime):
+        raise StorageError(f"Input from '{ref}' is not a binary glTF (.glb) model")
+    # kind == "any": no type restriction (media_info)
     return ResolvedInput(data=data, mime=mime, source=source)
 
 

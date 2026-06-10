@@ -12,6 +12,14 @@ RUN pip install --no-cache-dir -r requirements-mcp.txt
 # segfaulted pip's resolver, so install them on top of the already-satisfied base.
 RUN pip install --no-cache-dir trafilatura yt-dlp faster-whisper
 
+# Draco GLB compression (draco_compress): gltf-transform CLI rides on node — own layer,
+# same isolation principle as the extractor deps (python dep graph stays untouched).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nodejs npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @gltf-transform/cli@4 \
+    && npm cache clean --force
+
 COPY backend/__init__.py backend/processing.py backend/
 COPY forge_mcp/ forge_mcp/
 

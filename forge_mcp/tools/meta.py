@@ -29,6 +29,7 @@ def register(mcp, ctx):
         return {
             "engine": engine.status(),
             "ffmpeg_available": shutil.which("ffmpeg") is not None,
+            "gltf_transform_available": shutil.which("gltf-transform") is not None,
             "workspace_writable": ws_ok,
             "workspace_error": ws_err,
             "gemini_key_configured": bool(cfg.gemini_api_key),
