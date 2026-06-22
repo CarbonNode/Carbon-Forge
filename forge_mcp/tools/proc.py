@@ -26,6 +26,7 @@ def register(mcp, ctx):
         watermark_remove: bool = False,
         watermark_position: str = "bottom-right",
         watermark_size_pct: int = 15,
+        clean_holes: bool = False,
         subpath: str | None = None,
         filename: str | None = None,
     ) -> dict:
@@ -42,7 +43,9 @@ def register(mcp, ctx):
         flat solid background (the recommended way — see generate_image), also pass
         color_remove=true + color_auto_detect=true to strip the residual background fringe.
         Halo on an ALREADY-cut transparent image? Rescue it with smooth_edges(trim_px~6,
-        strength~3) to erode + defringe the matte."""
+        strength~3) to erode + defringe the matte. Solid background still TRAPPED inside
+        enclosed gaps (letter counters, keyholes, circles) afterwards? Pass clean_holes=true
+        here to punch them out in the same pass, or run clean_edges on the cut-out."""
         src = await storage.resolve_input(image, cfg=cfg, kind="image")
         opts = PipelineOptions(
             model=model, alpha_matting=alpha_matting, fg_threshold=fg_threshold,
@@ -51,7 +54,7 @@ def register(mcp, ctx):
             color_tolerance=color_tolerance, edge_smooth=edge_smooth,
             edge_strength=edge_strength, edge_trim=edge_trim, auto_trim=auto_trim,
             watermark_remove=watermark_remove, watermark_position=watermark_position,
-            watermark_size_pct=watermark_size_pct,
+            watermark_size_pct=watermark_size_pct, clean_iso=clean_holes,
         )
         out = await engine.run_pipeline(src.data, opts)
         return await storage.save_result(out, project=project, subpath=subpath,
@@ -161,3 +164,44 @@ def register(mcp, ctx):
             skip_bg=True, edge_smooth=True, edge_strength=strength, edge_trim=trim_px))
         return await storage.save_result(out, project=project, subpath=subpath,
                                          filename=filename or "smoothed", ext="png", cfg=cfg)
+
+    @mcp.tool()
+    async def clean_edges(image: str, project: str, color: str | None = None,
+                          tolerance: int = 32, min_pocket_px: int = 4,
+                          max_pocket_frac: float = 0.5, feather: int = 0,
+                          subpath: str | None = None, filename: str | None = None) -> dict:
+        """Clean up a transparent cut-out by removing leftover background TRAPPED
+        INSIDE the artwork — the solid fill stuck in the counters of letters (the
+        holes in D / A / e / o), keyholes, the dot of a '?', rings and circles —
+        that background removal leaves behind because those pockets aren't
+        connected to the outer edge.
+
+        A region is cleared only when it's the background colour (default white;
+        pass color='#rrggbb' if the trapped fill is another flat colour) AND fully
+        sealed — its blob never touches the transparent edge — so every outline and
+        the silhouette are preserved. Use this when an already-isolated sticker
+        still shows solid background in enclosed gaps (logos, text, emblems, icons).
+
+        This is the companion to smooth_edges: smooth_edges feathers/defringes a
+        soft semi-transparent HALO around the silhouette; clean_edges clears SOLID
+        trapped fills on a hard binary matte. On portraits it will also clear white
+        eye-whites (geometrically identical to a trapped pocket), so it's aimed at
+        text / logo / shape stickers.
+
+        image: https URL or workspace path '<Project>/<relative path>'.
+        color: trapped background colour as '#rrggbb' (default white '#ffffff').
+        tolerance: colour-match radius 0–255 (default 32).
+        min_pocket_px: ignore sealed specks smaller than this (default 4).
+        max_pocket_frac: never clear a pocket larger than this fraction of the
+            sprite (default 0.5) — guards a legitimately large enclosed fill.
+        feather: soften the freshly-cut borders by N px (default 0 = crisp)."""
+        src = await storage.resolve_input(image, cfg=cfg, kind="image")
+        rgb = None
+        if color:
+            parsed = parse_colors([color])
+            rgb = parsed[0] if parsed else None
+        out = await engine.run_pipeline(src.data, PipelineOptions(
+            skip_bg=True, clean_iso=True, clean_color=rgb, clean_tolerance=tolerance,
+            clean_min_px=min_pocket_px, clean_max_frac=max_pocket_frac, clean_feather=feather))
+        return await storage.save_result(out, project=project, subpath=subpath,
+                                         filename=filename or "cleaned", ext="png", cfg=cfg)

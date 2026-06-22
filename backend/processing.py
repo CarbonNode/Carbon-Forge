@@ -275,6 +275,94 @@ def smooth_edges(img_bytes, strength, trim_px):
     return buf.getvalue()
 
 
+def clean_edges(img_bytes, color=None, tolerance=32, alpha_threshold=128,
+                min_pocket_px=4, max_pocket_frac=0.5, feather=0):
+    """Remove leftover background TRAPPED INSIDE a cut-out.
+
+    After background removal, regions the matte couldn't reach because they
+    aren't connected to the outer edge — the counters of letters (the holes in
+    D / A / e / o), keyholes, the dot of a '?', rings and circles — stay filled
+    with solid opaque background. This makes those pockets transparent.
+
+    A pixel is cleared only if BOTH hold: (1) it's the background colour
+    (``color``, default white) within ``tolerance``, and (2) its connected blob
+    is fully *sealed* — it never touches a transparent pixel or the image
+    border. The silhouette edge and every outline touch the transparent
+    background, so they're always preserved. (Contrast smooth_edges, which
+    feathers a soft semi-transparent HALO; this clears SOLID fills on a hard
+    binary matte.)
+
+    color: (r, g, b) target background colour; None → white (255, 255, 255).
+    tolerance: colour-match radius in RGB distance (0–255, default 32).
+    min_pocket_px: ignore sealed blobs smaller than this (speck guard).
+    max_pocket_frac: never clear a blob larger than this fraction of the opaque
+        area (guards a legitimately large enclosed fill).
+    feather: if > 0, anti-alias the freshly-cut borders by N px (default 0 = crisp).
+    """
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
+    data = np.array(img)
+    h, w = data.shape[:2]
+    alpha = data[:, :, 3]
+    opaque = alpha >= alpha_threshold
+    if not opaque.any():
+        return img_bytes
+
+    if color is None:
+        color = (255, 255, 255)
+    tr, tg, tb = (int(color[0]), int(color[1]), int(color[2]))
+    rgb = data[:, :, :3].astype(np.float32)
+    dist = np.sqrt((rgb[:, :, 0] - tr) ** 2 + (rgb[:, :, 1] - tg) ** 2 + (rgb[:, :, 2] - tb) ** 2)
+    bgcol = opaque & (dist <= tolerance)
+    if not bgcol.any():
+        return img_bytes
+
+    # 8-connected components of background-coloured opaque pixels.
+    labeled, n = label(bgcol, structure=np.ones((3, 3), dtype=int))
+
+    # "Open" = the transparent background OR the image border. A blob is trapped
+    # iff it touches NO open pixel. A bg pixel adjacent (4-conn) to transparency
+    # is flagged by dilating the transparent mask; border pixels count as open so
+    # a blob that runs off-frame is treated as background, not a trapped pocket.
+    transparent = ~opaque
+    near_open = binary_dilation(transparent)
+    near_open[0, :] = near_open[-1, :] = near_open[:, 0] = near_open[:, -1] = True
+    open_labels = set(np.unique(labeled[near_open & bgcol]).tolist())
+    open_labels.discard(0)
+
+    sizes = np.bincount(labeled.ravel())
+    sprite_area = int(opaque.sum())
+    max_px = max_pocket_frac * sprite_area
+    remove = np.zeros((h, w), dtype=bool)
+    removed = 0
+    for lab in range(1, n + 1):
+        if lab in open_labels:           # touches the transparent edge → outline/silhouette, keep
+            continue
+        sz = int(sizes[lab])
+        if sz < min_pocket_px or sz > max_px:
+            continue
+        remove |= labeled == lab
+        removed += 1
+
+    new_alpha = alpha.astype(np.float32)
+    new_alpha[remove] = 0.0
+
+    if feather > 0 and remove.any():
+        # Soften only the newly-opened borders: blur, then take the min so we
+        # never *add* opacity back — only ease the hard cut.
+        soft = gaussian_filter(new_alpha, sigma=float(feather))
+        band = binary_dilation(remove, iterations=max(1, int(feather))) & opaque & ~remove
+        new_alpha[band] = np.minimum(new_alpha[band], soft[band])
+
+    data[:, :, 3] = np.clip(new_alpha, 0, 255).astype(np.uint8)
+    print(f"Clean edges: removed {removed} trapped pockets ({int(remove.sum())}px), "
+          f"color=({tr},{tg},{tb}), tolerance={tolerance}", flush=True)
+
+    result = Image.fromarray(data)
+    buf = io.BytesIO()
+    result.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def trim_transparent(img_bytes):
     """Remove transparent padding around the image."""
     img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
@@ -405,6 +493,12 @@ class PipelineOptions:
     watermark_remove: bool = False
     watermark_position: str = "bottom-right"
     watermark_size_pct: int = 15
+    clean_iso: bool = False            # punch out sealed trapped-background pockets
+    clean_color: tuple = None          # (r,g,b) target bg colour; None → white
+    clean_tolerance: int = 32
+    clean_min_px: int = 4
+    clean_max_frac: float = 0.5
+    clean_feather: int = 0
 
 
 def parse_colors(raw_colors):
@@ -449,6 +543,11 @@ def run_pipeline(data: bytes, opts: PipelineOptions) -> bytes:
 
     if opts.color_remove and colors:
         result = remove_colors(result, colors, opts.color_tolerance)
+
+    if opts.clean_iso:
+        result = clean_edges(result, color=opts.clean_color, tolerance=opts.clean_tolerance,
+                             min_pocket_px=opts.clean_min_px, max_pocket_frac=opts.clean_max_frac,
+                             feather=opts.clean_feather)
 
     if opts.edge_smooth:
         result = smooth_edges(result, opts.edge_strength, opts.edge_trim)
