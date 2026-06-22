@@ -63,18 +63,53 @@ def register(mcp, ctx):
         project: str,
         min_sprite_area: int = 400,
         skip_bg: bool = False,
-        model: str = "u2net",
+        model: str = "isnet-general-use",
+        alpha_matting: bool = False,
+        fg_threshold: int = 240,
+        bg_threshold: int = 10,
+        erode_size: int = 10,
+        colors: list[str] | None = None,
+        color_tolerance: int = 25,
+        edge_strength: int = 60,
+        edge_trim: int = 2,
+        watermark_remove: bool = False,
+        watermark_position: str = "bottom-right",
+        watermark_size_pct: int = 15,
         subpath: str | None = None,
         filename: str | None = None,
     ) -> dict:
-        """Split a sprite sheet into individual trimmed PNG sprites. By default runs
-        background removal + auto color/edge cleanup first; set skip_bg=true if the
-        image is already transparent."""
+        """Split a sheet into individual trimmed, transparent PNG sprites (the "Carbon Isolate"
+        split). By default it first isolates the artwork — AI background removal, then keys out
+        the (auto-detected) background color, then defringes/erodes edges — so the gaps between
+        pieces become fully transparent and connected-component labeling separates them cleanly;
+        each sprite is auto-trimmed to its bounding box. Set skip_bg=true to split an image that
+        is ALREADY transparent (ignores the cleanup options below).
+
+        image: https URL or workspace path '<Project>/<relative path>'. Returns {count, sprites:[…]}.
+
+        Options (mirror the desktop app):
+        - model: rembg model — u2net, u2netp (fast), u2net_human_seg, isnet-general-use (default,
+          best edges), silueta.
+        - min_sprite_area: drop blobs smaller than this (px²; default 400) — filters specks.
+        - alpha_matting (+ fg_threshold/bg_threshold/erode_size): refine soft/semi-transparent edges.
+        - colors (hex like '#ffffff') + color_tolerance (1–100, effective floor 25): EXTRA background
+          colors to key out on top of the auto-detected one.
+        - edge_strength (1–100) / edge_trim (px): defringe strength and edge erosion — edge_trim also
+          severs thin bridges so touching pieces don't merge into one sprite.
+        - watermark_remove (+ position/size_pct): LaMa-inpaint a watermark before splitting."""
         src = await storage.resolve_input(image, cfg=cfg, kind="image")
         if skip_bg:
             sprites = await engine.split_only(src.data, min_sprite_area)
         else:
-            sprites = await engine.run_split_pipeline(src.data, PipelineOptions(model=model), min_sprite_area)
+            opts = PipelineOptions(
+                model=model, alpha_matting=alpha_matting, fg_threshold=fg_threshold,
+                bg_threshold=bg_threshold, erode_size=erode_size,
+                colors=parse_colors(colors), color_tolerance=color_tolerance,
+                edge_smooth=True, edge_strength=edge_strength, edge_trim=edge_trim,
+                watermark_remove=watermark_remove, watermark_position=watermark_position,
+                watermark_size_pct=watermark_size_pct,
+            )
+            sprites = await engine.run_split_pipeline(src.data, opts, min_sprite_area)
         base = filename or "sprite"
         results = []
         for i, s in enumerate(sprites, 1):
