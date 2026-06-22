@@ -134,6 +134,32 @@ class CharacterStore:
         with self._lock:
             return [self._public(e) for e in self._chars.values()]
 
+    def update(self, *, name, new_name=None, description=None, mode=None, weight=None) -> dict:
+        """Edit a character's metadata in place (rename / description / mode / weight). References untouched."""
+        k = _key(name)
+        with self._lock:
+            e = self._chars.get(k)
+            if not e:
+                raise CharacterError(f"No saved character named '{name}'")
+            if description is not None:
+                e["description"] = description
+            if mode is not None:
+                e["mode"] = mode
+            if weight is not None:
+                e["weight"] = weight
+            if new_name is not None and new_name.strip():
+                nk = _key(new_name)
+                if nk != k and nk in self._chars:
+                    raise CharacterError(f"A character named '{new_name}' already exists")
+                e["name"] = new_name.strip()
+                e["key"] = nk
+                if nk != k:
+                    del self._chars[k]
+                    self._chars[nk] = e
+            e["updated_at"] = _now()
+            self._flush()
+            return self._public(e)
+
     def delete(self, name: str) -> dict:
         with self._lock:
             e = self._chars.pop(_key(name), None)

@@ -400,6 +400,16 @@ def register(mcp, ctx):
         return chars.delete(name)
 
     @mcp.tool()
+    async def update_character(name: str, new_name: str | None = None, description: str | None = None,
+                               mode: str | None = None, weight: float | None = None) -> dict:
+        """Edit a saved character's metadata IN PLACE - rename it, or change its description,
+        default mode (character|face|style) or default weight (0.4-1.2). Reference images are left
+        untouched (use add_character_reference to add more, or save_character to replace the primary).
+        Only the provided fields change."""
+        return {"character": chars.update(name=name, new_name=new_name, description=description,
+                                          mode=mode, weight=weight)}
+
+    @mcp.tool()
     async def generate_icon(subject: str, project: str, style: str = "flat vector",
                             model: str = "flux", size: int = 512, transparent: bool = True,
                             seed: int | None = None, subpath: str | None = None,
