@@ -80,7 +80,7 @@ def register(mcp, ctx):
             raise g.GenerationError(f"aspect_ratio must be one of {g.IMAGE_ASPECTS}")
         model_id = g.resolve_image_model(model)
         n = max(1, min(count, g.imagen_max_batch(model_id)))
-        images = await g.call_imagen(ctx.http, cfg.gemini_api_key, model_id, prompt,
+        images = await g.call_imagen(ctx.http, cfg.gemini_api_keys, model_id, prompt,
                                      sample_count=n, aspect_ratio=aspect_ratio)
         if not images:
             raise g.GenerationError("Imagen returned no images (prompt may have been refused)")
@@ -151,7 +151,7 @@ def register(mcp, ctx):
             _require_key()
             engine = "imagen-4 (fallback)"
             ar = aspect_ratio if aspect_ratio in g.IMAGE_ASPECTS else "1:1"
-            images = await g.call_imagen(ctx.http, cfg.gemini_api_key,
+            images = await g.call_imagen(ctx.http, cfg.gemini_api_keys,
                                          g.resolve_image_model("imagen-4"), prompt,
                                          sample_count=1, aspect_ratio=ar)
             if not images:
@@ -216,7 +216,7 @@ def register(mcp, ctx):
         for r in reference_images:
             resolved = await storage.resolve_input(r, cfg=cfg, kind="image")
             refs.append((resolved.mime, resolved.data))
-        images = await g.call_gemini_image(ctx.http, cfg.gemini_api_key, prompt, refs)
+        images = await g.call_gemini_image(ctx.http, cfg.gemini_api_keys, prompt, refs)
         base = storage.safe_filename(filename or "edited")
         results = []
         for i, img in enumerate(images, 1):
@@ -446,7 +446,7 @@ def register(mcp, ctx):
                     raster = None
         if raster is None:  # cloud fallback (or model='imagen')
             _require_key()
-            raster = (await g.call_imagen(ctx.http, cfg.gemini_api_key,
+            raster = (await g.call_imagen(ctx.http, cfg.gemini_api_keys,
                                           g.resolve_image_model("imagen-4"), prompt,
                                           sample_count=1, aspect_ratio="1:1"))[0]
             engine_str = "imagen-4"

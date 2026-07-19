@@ -85,6 +85,28 @@ def parse_imagen_predictions(json_resp: dict) -> list:
     return out
 
 
+async def _gemini_fetch(client, url, api_key, body):
+    """POST to Gemini trying each key in turn; rotate to the NEXT key only on a
+    quota/429 depletion (a spent key fails over to the backup). api_key may be a
+    single str or an ordered list of keys."""
+    keys = [api_key] if isinstance(api_key, str) else list(api_key or [])
+    keys = [k for k in keys if k]
+    if not keys:
+        raise GenerationError("GEMINI_API_KEY is not configured on the forge service")
+    last = None
+    for i, k in enumerate(keys):
+        try:
+            return await fetch_json(client, url, headers={"x-goog-api-key": k}, json_body=body)
+        except GenerationError as e:
+            last = e
+            m = str(e)
+            depleted = ("HTTP 429" in m or "RESOURCE_EXHAUSTED" in m or "depleted" in m.lower() or "quota" in m.lower())
+            if depleted and i < len(keys) - 1:
+                continue
+            raise
+    raise last
+
+
 async def call_imagen(client, api_key, model, prompt, sample_count=1, aspect_ratio="1:1") -> list:
     url = f"{GEMINI_API}/models/{model}:predict"
     body = {
@@ -95,7 +117,7 @@ async def call_imagen(client, api_key, model, prompt, sample_count=1, aspect_rat
             "personGeneration": "allow_adult",
         },
     }
-    json_resp = await fetch_json(client, url, headers={"x-goog-api-key": api_key}, json_body=body)
+    json_resp = await _gemini_fetch(client, url, api_key, body)
     return parse_imagen_predictions(json_resp)
 
 
@@ -114,7 +136,7 @@ async def call_gemini_image(client, api_key, prompt, reference_images=(), model=
     parts = [{"inlineData": {"mimeType": m, "data": base64.b64encode(b).decode()}} for (m, b) in reference_images]
     parts.append({"text": prompt})
     body = {"contents": [{"parts": parts}]}
-    json_resp = await fetch_json(client, url, headers={"x-goog-api-key": api_key}, json_body=body)
+    json_resp = await _gemini_fetch(client, url, api_key, body)
     images = parse_gemini_parts(json_resp)
     if not images:
         raise GenerationError("Gemini returned no images (prompt may have been refused — try rephrasing)")
@@ -144,7 +166,7 @@ async def start_veo(client, api_key, model, prompt, start_image=None,
                     aspect_ratio="16:9", duration_seconds=8, generate_audio=True) -> str:
     url = f"{GEMINI_API}/models/{model}:predictLongRunning"
     body = build_veo_body(model, prompt, start_image, aspect_ratio, duration_seconds, generate_audio)
-    json_resp = await fetch_json(client, url, headers={"x-goog-api-key": api_key}, json_body=body)
+    json_resp = await _gemini_fetch(client, url, api_key, body)
     if not json_resp.get("name"):
         raise GenerationError("Veo: no operation name returned")
     return json_resp["name"]
