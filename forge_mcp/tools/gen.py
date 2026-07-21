@@ -93,6 +93,75 @@ def register(mcp, ctx):
         return {"count": len(results), "images": results}
 
     @mcp.tool()
+    async def generate_image_grid(subjects: list[str], project: str,
+                                  model: str = "imagen-4-fast", style: str = "",
+                                  aspect_ratio: str = "1:1", cols: int | None = None,
+                                  background: str = "plain dark neutral", inset: int = 12,
+                                  cell_size: int = 512, subpath: str | None = None,
+                                  filename: str | None = None) -> dict:
+        """Generate MANY images in ONE paid Imagen request to save cost — renders a single
+        grid with one DISTINCT subject per cell, then crops it into separate image files.
+        Ideal for batches (NPC portraits, monsters, items, icons): ~1 request for up to ~9
+        images instead of N separate calls (~9x cheaper).
+
+        subjects: 2-16 short per-cell descriptions; EACH becomes its own output image, so make
+        them clearly distinct (vary subject/age/build/colour) or the cells look alike. Best
+        detail at 2-9 (a 3x3 grid gives ~341px cells, upscaled to cell_size); 10-16 works for
+        small icons but cells get smaller/softer. style: a shared look prepended to every cell
+        (e.g. 'oil-painting fantasy character portrait, head and shoulders, muted palette').
+        cols: grid columns (default auto ~square). aspect_ratio 1:1 keeps cells square. Returns
+        one image (url/width/height) per subject IN ORDER, plus grid_url (the raw sheet — eyeball
+        it before shipping) and cost_note. For remove_background cutouts, put the flat-magenta
+        background guidance from generate_image into `style`."""
+        _require_key()
+        import io
+        import math
+        from PIL import Image
+        subs = [s.strip() for s in (subjects or []) if s and s.strip()]
+        if not (2 <= len(subs) <= 16):
+            raise g.GenerationError("subjects must contain 2-16 non-empty items")
+        if aspect_ratio not in g.IMAGE_ASPECTS:
+            raise g.GenerationError(f"aspect_ratio must be one of {g.IMAGE_ASPECTS}")
+        n = len(subs)
+        c = max(1, cols or round(math.sqrt(n)))
+        r = math.ceil(n / c)
+        sty = (style.strip().rstrip(",") + ", ") if style.strip() else ""
+        cells_txt = "; ".join(f"cell {i + 1} = {s}" for i, s in enumerate(subs))
+        prompt = (f"A clean {c}-column by {r}-row grid of {n} SEPARATE {sty}images, each in "
+                  f"its own cell, thin dark gutters between cells, {background} background, no "
+                  f"text, no labels, no numbers, no borders. Each cell a DIFFERENT subject, in "
+                  f"reading order left-to-right then top-to-bottom: {cells_txt}. Every cell "
+                  f"visibly distinct — no two alike.")
+        model_id = g.resolve_image_model(model)
+        imgs = await g.call_imagen(ctx.http, cfg.gemini_api_key, model_id, prompt,
+                                   sample_count=1, aspect_ratio=aspect_ratio)
+        if not imgs:
+            raise g.GenerationError("Imagen returned no images (grid prompt may have been refused)")
+        grid = Image.open(io.BytesIO(imgs[0])).convert("RGB")
+        W, H = grid.size
+        cw, ch = W / c, H / r
+        base = storage.safe_filename(filename or (style[:24] or "grid"))
+        results = []
+        for idx in range(n):
+            row, col = divmod(idx, c)
+            box = (int(col * cw) + inset, int(row * ch) + inset,
+                   int((col + 1) * cw) - inset, int((row + 1) * ch) - inset)
+            cell = grid.crop(box)
+            if cell_size and cell.width < cell_size:
+                scale = cell_size / cell.width
+                cell = cell.resize((cell_size, max(1, int(cell.height * scale))), Image.LANCZOS)
+            buf = io.BytesIO(); cell.save(buf, "PNG")
+            res = await storage.save_result(buf.getvalue(), project=project, subpath=subpath,
+                                            filename=f"{base}-{idx + 1}", ext="png", cfg=cfg)
+            res["subject"] = subs[idx]
+            results.append(res)
+        gbuf = io.BytesIO(); grid.save(gbuf, "PNG")
+        grid_res = await storage.save_result(gbuf.getvalue(), project=project, subpath=subpath,
+                                             filename=f"{base}-GRID", ext="png", cfg=cfg)
+        return {"count": len(results), "images": results, "grid_url": grid_res["url"],
+                "cost_note": f"{len(results)} images from 1 Imagen request ({c}x{r} grid)"}
+
+    @mcp.tool()
     async def generate_local(prompt: str, project: str, model: str = "pony",
                              aspect_ratio: str = "3:4", steps: int | None = None,
                              cfg_scale: float | None = None, negative_prompt: str | None = None,
