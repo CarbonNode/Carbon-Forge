@@ -3,7 +3,7 @@
 AI-powered asset generation & refinement. Repo: `CarbonNode/Carbon-Forge`. Two deliverables share one engine:
 
 1. **Desktop app** — Electron (`main.js`, `renderer/`) + bundled Python Flask backend (`backend/server.py`, PyInstaller via `npm run build-backend`). Runs locally on port 5123.
-2. **Hosted MCP service** — `forge_mcp/` package, Docker container on **laybackrig** (192.168.0.177:5125). Proxied by the Carbon Cortex gateway as connector **`forge`** (tools surface as `forge__*` in every gateway session).
+2. **Hosted MCP service** — `forge_mcp/` package, Docker container on **super-server** (192.168.0.197:5125; split 2026-07-01 — the API/orchestrator lives here, GPU generation workers stay on laybackrig/maingamingrig and are dispatched via `FORGE_*_URL`). Proxied by the Carbon Cortex gateway as connector **`forge`** (tools surface as `forge__*` in every gateway session).
 
 ## The one shared-engine rule
 
@@ -42,27 +42,25 @@ Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 - **Veo videos** are async: `generate_video` → `job_id`, poll `job_status`. Jobs persist across restarts (in-flight operations resume).
 - **Generation needs `GEMINI_API_KEY`** in the service `.env`; without it those tools return a readable error and everything else works.
 
-## Deploy (hosted service)
+## Deploy (hosted service) — super-server since 2026-07-01
 
-Lives at `C:\Programming\CarbonForge` on laybackrig. `.env` (gitignored) holds FORGE_TOKEN, GEMINI_API_KEY, CIFS creds.
+Two dirs on **super-server** (192.168.0.197):
+- `C:\Programming\CarbonForge` — the RUNTIME: compose project `carbon-forge` (`docker-compose.yml`, service `forge`, container `carbon-forge-adhoc`, image `carbon-forge-mcp:latest`) + `.env` (gitignored: FORGE_TOKEN, GEMINI keys, ELEVENLABS, CIFS creds, `FORGE_COMFY_URL`/`FORGE_CHATTERBOX_URL` etc. → laybackrig/maingamingrig workers). The CIFS `workspace` volume (`//192.168.0.35/Workspace`) is declared here.
+- `C:\Programming\CarbonForge-src` — the SOURCE: a git checkout tracking `origin/main` (converted 2026-07-28; before that the box had no checkout and builds shipped by copying files — don't regress to that). Never hand-edit it; it exists to be pulled and built.
+
+Deploy a code change (from any Cortex session, via `shell-super_server__exec`):
 
 ```
-ssh 192.168.0.177 "cd /d C:\Programming\CarbonForge && git pull && schtasks /create /tn ForgeBuild /tr C:\Programming\CarbonForge\build-forge.bat /sc ONCE /st 23:59 /f && schtasks /run /tn ForgeBuild"
-# poll build-forge.log for BUILD_OK/DEPLOY_DONE, then: schtasks /delete /tn ForgeBuild /f
+1. commit + push to origin/main
+2. git -C C:\Programming\CarbonForge-src pull --ff-only
+3. schtasks /create /tn ForgeGridBuild /tr C:\Programming\CarbonForge-src\build-grid.bat /sc ONCE /st 23:59 /f && schtasks /run /tn ForgeGridBuild
+   (build-grid.bat = docker build -f Dockerfile.mcp -t carbon-forge-mcp . > build-grid.log; poll build-grid.log for BUILD_OK/BUILD_FAIL, then schtasks /delete /tn ForgeGridBuild /f)
+4. docker compose -p carbon-forge -f C:\Programming\CarbonForge\docker-compose.yml up -d forge   (recreates onto the new image; MCP sessions reconnect in seconds)
 ```
 
-⚠️ `docker compose build` over plain SSH **hangs** on the Windows credential helper — the scheduled task (interactive session) is mandatory. `build-forge.bat` is in the repo root on laybackrig (gitignored content? no — created at deploy; recreate from CLAUDE.md if missing):
+⚠️ `docker build` from a non-interactive shell can hang on the Windows credential helper when a base image needs pulling — the one-shot scheduled task (interactive session) sidesteps it; `start /b` does NOT work through the agent shell. Take a `deploy-coordinator` lease on `super_server:carbon-forge` around steps 3-4. The old laybackrig checkout (`C:\Programming\CarbonForge` on 192.168.0.177) is SUNSET for the API — it still hosts the GPU worker stacks (ComfyUI :8188, Chatterbox :5126, Trellis :8082) and its git tree is stale/ahead — don't build the API there.
 
-```bat
-@echo off
-cd /d C:\Programming\CarbonForge
-docker compose -f docker-compose.forge.yml build forge >> build-forge.log 2>&1
-if %errorlevel%==0 (echo BUILD_OK >> build-forge.log) else (echo BUILD_FAIL >> build-forge.log)
-docker compose -f docker-compose.forge.yml up -d forge >> build-forge.log 2>&1
-echo DEPLOY_DONE >> build-forge.log
-```
-
-**Verify after deploy:** `https://forge.carbonrouting.dev/health` → 200; `python tests/manual_status.py http://192.168.0.177:5125/mcp` (FORGE_TOKEN env) → `workspace_writable: true`, `ffmpeg_available: true`.
+**Verify after deploy:** `https://forge.carbonrouting.dev/health` → 200; `docker exec carbon-forge-adhoc sh -c "grep -c <new symbol> /app/forge_mcp/<file>"` (a stale image is silent); then exercise a changed tool live through the gateway (`forge__*`).
 
 ## Audio / TTS (two providers)
 
@@ -76,7 +74,7 @@ echo DEPLOY_DONE >> build-forge.log
 | Piece | Where | Notes |
 |---|---|---|
 | SMB share `Workspace` | carbonserver, `C:\Workspace`, account `forge-svc` | CIFS volume in docker-compose.forge.yml |
-| Public URL | `forge.carbonrouting.dev` ingress on `cloudflared-gateway` tunnel (carbonserver, `C:\Programming\mcp-gateway\cloudflared\config.yml`) | → `http://192.168.0.177:5125` |
+| Public URL | `forge.carbonrouting.dev` ingress on super-server's `QuestbookCloudflared` tunnel (`C:\Programming\QuestbookTunnel\config.yml`) | → `http://localhost:5125` (repointed 2026-07-01; a dead ingress for it also lingers on carbonserver's mcp-gateway tunnel — harmless) |
 | Gateway connector | row `forge` (mcp-proxy) in gateway DB, category `media` | re-register: `scripts/register-forge-connector.mjs` in Carbon-Cortex (run via tsx inside `carbon-cortex-gateway-1`, needs FORGE_TOKEN env) |
 | Console UI | Carbon-Cortex `web/`: `HOME_APP_GROUPS.forge`, `connector-icons.ts`, `/icons/carbon-forge.png` | |
 
