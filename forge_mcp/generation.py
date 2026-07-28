@@ -130,12 +130,16 @@ def parse_gemini_parts(json_resp: dict) -> list:
             if isinstance(p.get("inlineData"), dict) and p["inlineData"].get("data")]
 
 
-async def call_gemini_image(client, api_key, prompt, reference_images=(), model=DEFAULT_GEMINI_IMAGE_MODEL) -> list:
-    """reference_images: list of (mime, raw_bytes). Refs go before the text part (main.js order)."""
+async def call_gemini_image(client, api_key, prompt, reference_images=(), model=DEFAULT_GEMINI_IMAGE_MODEL,
+                            aspect_ratio=None) -> list:
+    """reference_images: list of (mime, raw_bytes). Refs go before the text part (main.js order).
+    aspect_ratio: optional output shape (e.g. '3:4') via generationConfig.imageConfig."""
     url = f"{GEMINI_API}/models/{model}:generateContent"
     parts = [{"inlineData": {"mimeType": m, "data": base64.b64encode(b).decode()}} for (m, b) in reference_images]
     parts.append({"text": prompt})
     body = {"contents": [{"parts": parts}]}
+    if aspect_ratio:
+        body["generationConfig"] = {"imageConfig": {"aspectRatio": aspect_ratio}}
     json_resp = await _gemini_fetch(client, url, api_key, body)
     images = parse_gemini_parts(json_resp)
     if not images:

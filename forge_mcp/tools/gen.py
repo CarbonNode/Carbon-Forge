@@ -36,6 +36,64 @@ LOCAL_AR = {
     "9:16": (768, 1344), "16:9": (1344, 768),
 }
 
+# Per-kind scaffolding for generate_image_grid: a shared cell style, a background, and
+# whether cells get cut out transparent (+ square-padded) after splitting.
+GRID_KINDS = {
+    "spells": {
+        "style": ("a single dramatic magical spell effect icon, luminous glowing energy, vivid "
+                  "saturated colors, high contrast, centered, floating in empty space, no hands, "
+                  "no characters, no framing ring"),
+        "background": ("completely flat solid magenta #FF00FF filling the whole cell and every "
+                       "space around and inside the effect"),
+        "isolate": True, "pad": True,
+    },
+    "faces": {
+        "style": ("a painted fantasy character portrait, head and shoulders, facing the viewer, "
+                  "detailed expressive face, soft dramatic lighting"),
+        "background": "plain dark neutral studio",
+        "isolate": False, "pad": False,
+    },
+    "items": {
+        "style": ("a single game item, centered, slight three-quarter view, crisp detailed "
+                  "game-asset rendering, no border"),
+        "background": "completely flat solid magenta #FF00FF filling the whole cell",
+        "isolate": True, "pad": True,
+    },
+    "custom": {"style": "", "background": "plain dark neutral", "isolate": False, "pad": False},
+}
+
+GRID_IMAGEN_MODELS = ("imagen-4-fast", "imagen-4", "imagen-4-ultra")
+GRID_GEMINI_NAMES = ("auto", "gemini", "nano-banana", "gemini-2.5-flash-image", "flash-image")
+
+
+def _nearest_aspect(ratio: float) -> str:
+    import math
+    from forge_mcp import generation as g
+    return min(g.IMAGE_ASPECTS,
+               key=lambda a: abs(math.log((int(a.split(":")[0]) / int(a.split(":")[1])) / ratio)))
+
+
+def _grid_layout(n: int, cols: int | None, aspect_ratio: str | None) -> tuple[int, int, str]:
+    """(cols, rows, sheet_aspect). Prefers exact-fit, near-square grids, and — when no
+    aspect is forced — a sheet aspect matching the grid, so cells stay ~square and the
+    model is far more likely to draw the layout it was actually asked for."""
+    import math
+    if cols:
+        c = max(1, min(n, cols))
+        r = math.ceil(n / c)
+        return c, r, aspect_ratio or _nearest_aspect(c / r)
+    best = None
+    for c in range(1, n + 1):
+        r = math.ceil(n / c)
+        ar = aspect_ratio or _nearest_aspect(c / r)
+        arw, arh = (int(v) for v in ar.split(":"))
+        cell_ar = (arw / arh) * r / c
+        score = ((c * r - n) * 0.8 + abs(math.log(cell_ar))
+                 + abs(math.log(c / r)) * 0.5)
+        if best is None or score < best[0]:
+            best = (score, c, r, ar)
+    return best[1], best[2], best[3]
+
 _IPA_PRESETS = {"character": "PLUS (high strength)", "face": "PLUS FACE (portraits)",
                 "style": "PLUS (high strength)"}
 
@@ -93,73 +151,168 @@ def register(mcp, ctx):
         return {"count": len(results), "images": results}
 
     @mcp.tool()
-    async def generate_image_grid(subjects: list[str], project: str,
-                                  model: str = "imagen-4-fast", style: str = "",
-                                  aspect_ratio: str = "1:1", cols: int | None = None,
-                                  background: str = "plain dark neutral", inset: int = 12,
+    async def generate_image_grid(subjects: list[str], project: str, kind: str = "custom",
+                                  model: str = "auto", style: str = "",
+                                  reference_images: list[str] | None = None,
+                                  aspect_ratio: str | None = None, cols: int | None = None,
+                                  background: str | None = None, isolate: bool | None = None,
+                                  pad_to_square: bool | None = None,
+                                  snap_to_gutters: bool = True, inset: int | None = None,
                                   cell_size: int = 512, subpath: str | None = None,
                                   filename: str | None = None) -> dict:
-        """Generate MANY images in ONE paid Imagen request to save cost — renders a single
-        grid with one DISTINCT subject per cell, then crops it into separate image files.
-        Ideal for batches (NPC portraits, monsters, items, icons): ~1 request for up to ~9
-        images instead of N separate calls (~9x cheaper).
+        """Generate a BATCH of distinct images in ONE model call: renders a sheet laid out
+        as a grid, then cuts it into separate image files — the cheap, fast way to make
+        sets of spell icons, NPC faces, items, monsters (~1 request instead of N).
 
-        subjects: 2-16 short per-cell descriptions; EACH becomes its own output image, so make
-        them clearly distinct (vary subject/age/build/colour) or the cells look alike. Best
-        detail at 2-9 (a 3x3 grid gives ~341px cells, upscaled to cell_size); 10-16 works for
-        small icons but cells get smaller/softer. style: a shared look prepended to every cell
-        (e.g. 'oil-painting fantasy character portrait, head and shoulders, muted palette').
-        cols: grid columns (default auto ~square). aspect_ratio 1:1 keeps cells square. Returns
-        one image (url/width/height) per subject IN ORDER, plus grid_url (the raw sheet — eyeball
-        it before shipping) and cost_note. For remove_background cutouts, put the flat-magenta
-        background guidance from generate_image into `style`."""
+        EASY CALLS — kind presets do the styling AND the post-processing:
+          spell icons, cut transparent + squared:  {subjects:[...], project, kind:"spells"}
+          NPC face portraits:                      {subjects:[...], project, kind:"faces"}
+          item sprites, cut transparent:           {subjects:[...], project, kind:"items"}
+          same face/style in every cell:           add reference_images:[url or '<Proj>/<path>']
+        Refine with `style` (appended to the preset), override `background`/`isolate`/
+        `pad_to_square` individually, or use kind:"custom" for full manual control.
+
+        subjects: 2-16 short per-cell descriptions, each becoming its own output image, in
+        order. Make them clearly distinct or cells look alike. Best detail at 2-9.
+
+        HARDENED PATHWAY: the sheet is cut along the grid the model ACTUALLY drew, not
+        blind equal division — drawn gutter lines are detected (outer margins included)
+        and each cell is shaved of frame residue. If the model drew a DIFFERENT grid than
+        asked (e.g. a 3x3 for 6 subjects, padding with duplicates), ALL drawn cells come
+        back cleanly cut, result.grid.mismatch=true, and a warning explains that subject
+        labels beyond the drawn order are best-effort — eyeball grid_url. isolate=true
+        cuts every cell to a transparent trimmed sprite (rembg clean-cutout recipe);
+        pad_to_square centers it on a transparent cell_size square. A cell whose cutout
+        comes back empty keeps its uncut version (warned).
+
+        model: "auto" (default) = Gemini 2.5 Flash Image — best at following grid layouts,
+        required for reference_images — falling back to imagen-4-fast if Gemini refuses.
+        Pass imagen-4-fast | imagen-4 | imagen-4-ultra to force Imagen, or "gemini" to
+        forbid the fallback. Multi-key failover + one refusal retry are automatic.
+        aspect_ratio/cols: normally leave unset — the layout picker chooses an exact-fit,
+        near-square grid AND a sheet aspect matching it (cells stay square, the model
+        complies far more often). Returns one image per subject IN ORDER (each with
+        .subject, .isolated), plus grid_url (raw sheet), engine, grid{cols,rows,mode,
+        mismatch,snapped_lines}, warnings, cost_note."""
         _require_key()
         import io
-        import math
         from PIL import Image
+        from forge_mcp import gridcut
         subs = [s.strip() for s in (subjects or []) if s and s.strip()]
         if not (2 <= len(subs) <= 16):
             raise g.GenerationError("subjects must contain 2-16 non-empty items")
-        if aspect_ratio not in g.IMAGE_ASPECTS:
+        if aspect_ratio is not None and aspect_ratio not in g.IMAGE_ASPECTS:
             raise g.GenerationError(f"aspect_ratio must be one of {g.IMAGE_ASPECTS}")
+        preset = GRID_KINDS.get(kind)
+        if preset is None:
+            raise g.GenerationError(f"kind must be one of: {', '.join(GRID_KINDS)}")
+        if model not in GRID_GEMINI_NAMES and model not in GRID_IMAGEN_MODELS:
+            raise g.GenerationError(
+                f"model must be one of: {', '.join(('auto', 'gemini') + GRID_IMAGEN_MODELS)}")
+        do_isolate = preset["isolate"] if isolate is None else isolate
+        do_pad = (preset["pad"] if pad_to_square is None else pad_to_square) and do_isolate
+        bg = (background or preset["background"]).strip()
+        sty = ", ".join(p for p in (preset["style"], style.strip().rstrip(",")) if p)
+
         n = len(subs)
-        c = max(1, cols or round(math.sqrt(n)))
-        r = math.ceil(n / c)
-        sty = (style.strip().rstrip(",") + ", ") if style.strip() else ""
+        c, r, ar = _grid_layout(n, cols, aspect_ratio)
         cells_txt = "; ".join(f"cell {i + 1} = {s}" for i, s in enumerate(subs))
-        prompt = (f"A clean {c}-column by {r}-row grid of {n} SEPARATE {sty}images, each in "
-                  f"its own cell, thin dark gutters between cells, {background} background, no "
-                  f"text, no labels, no numbers, no borders. Each cell a DIFFERENT subject, in "
-                  f"reading order left-to-right then top-to-bottom: {cells_txt}. Every cell "
-                  f"visibly distinct — no two alike.")
-        model_id = g.resolve_image_model(model)
-        imgs = await g.call_imagen(ctx.http, cfg.gemini_api_key, model_id, prompt,
-                                   sample_count=1, aspect_ratio=aspect_ratio)
-        if not imgs:
-            raise g.GenerationError("Imagen returned no images (grid prompt may have been refused)")
-        grid = Image.open(io.BytesIO(imgs[0])).convert("RGB")
-        W, H = grid.size
-        cw, ch = W / c, H / r
-        base = storage.safe_filename(filename or (style[:24] or "grid"))
+        filler = c * r - n
+        filler_txt = (f" Cells {n + 1}-{c * r}: completely empty, just the plain background."
+                      if filler else "")
+        sty_txt = f"{sty}, " if sty else ""
+        prompt = (f"A clean {c}-column by {r}-row grid of {c * r} equal-size cells with thin "
+                  f"plain gutter lines exactly on the grid between cells. Each cell: "
+                  f"{sty_txt}on a {bg} background. No text, no labels, no numbers, no "
+                  f"captions, no outer border. Each cell a DIFFERENT subject, in reading "
+                  f"order left-to-right then top-to-bottom: {cells_txt}.{filler_txt} Every "
+                  f"cell visibly distinct — no two alike.")
+
+        refs = []
+        for ref in (reference_images or [])[:6]:
+            resolved = await storage.resolve_input(ref, cfg=cfg, kind="image")
+            refs.append((resolved.mime, resolved.data))
+
+        warnings = []
+        sheet = eng = None
+        if refs or model in GRID_GEMINI_NAMES:
+            try:
+                try:
+                    imgs = await g.call_gemini_image(ctx.http, cfg.gemini_api_keys, prompt,
+                                                     refs, aspect_ratio=ar)
+                except g.GenerationError:
+                    warnings.append("first Gemini attempt failed; retried")
+                    imgs = await g.call_gemini_image(ctx.http, cfg.gemini_api_keys,
+                                                     "Stylized digital artwork. " + prompt,
+                                                     refs, aspect_ratio=ar)
+                sheet, eng = imgs[0], g.DEFAULT_GEMINI_IMAGE_MODEL
+            except g.GenerationError as e:
+                if refs or model != "auto":
+                    raise  # explicitly wanted Gemini (or refs require it) — don't switch looks
+                warnings.append(f"Gemini sheet failed ({e}); fell back to imagen-4-fast")
+        if sheet is None:
+            alias = model if model in GRID_IMAGEN_MODELS else "imagen-4-fast"
+            model_id = g.resolve_image_model(alias)
+            imgs = await g.call_imagen(ctx.http, cfg.gemini_api_keys, model_id, prompt,
+                                       sample_count=1, aspect_ratio=ar)
+            if not imgs:
+                warnings.append("first Imagen attempt returned nothing; retried")
+                imgs = await g.call_imagen(ctx.http, cfg.gemini_api_keys, model_id,
+                                           "Stylized digital artwork. " + prompt,
+                                           sample_count=1, aspect_ratio=ar)
+            if not imgs:
+                raise g.GenerationError("Imagen returned no images (grid prompt may have been refused)")
+            sheet, eng = imgs[0], alias
+
+        cells, grid_meta = await asyncio.to_thread(
+            gridcut.snap_cut, sheet, c, r, n, inset, snap_to_gutters)
+        if not grid_meta["mismatch"] and len(cells) > n:
+            cells = cells[:n]  # drop the filler cells we asked for
+        if grid_meta["mismatch"]:
+            d_c, d_r = grid_meta["cols"], grid_meta["rows"]
+            warnings.append(
+                f"model drew a {d_c}x{d_r} grid instead of the requested {c}x{r} — returned all "
+                f"{len(cells)} drawn cells; subject labels are best-effort, check grid_url")
+            if len(cells) < n:
+                warnings.append(f"only {len(cells)} cells were drawn for {n} subjects")
+
+        iso_opts = PipelineOptions(model="isnet-general-use", alpha_matting=True, edge_smooth=True,
+                                   auto_trim=True, color_remove=True, color_auto_detect=True)
+        base = storage.safe_filename(filename or (kind if kind != "custom" else (style[:24] or "grid")))
         results = []
-        for idx in range(n):
-            row, col = divmod(idx, c)
-            box = (int(col * cw) + inset, int(row * ch) + inset,
-                   int((col + 1) * cw) - inset, int((row + 1) * ch) - inset)
-            cell = grid.crop(box)
+        for idx, cell in enumerate(cells):
             if cell_size and cell.width < cell_size:
                 scale = cell_size / cell.width
                 cell = cell.resize((cell_size, max(1, int(cell.height * scale))), Image.LANCZOS)
             buf = io.BytesIO(); cell.save(buf, "PNG")
-            res = await storage.save_result(buf.getvalue(), project=project, subpath=subpath,
+            out_bytes = buf.getvalue()
+            isolated = False
+            if do_isolate:
+                cut = await engine.run_pipeline(out_bytes, iso_opts)
+                cut_im = Image.open(io.BytesIO(cut))
+                alpha_box = (cut_im.getchannel("A").getbbox()
+                             if cut_im.mode == "RGBA" else cut_im.getbbox())
+                if alpha_box:
+                    out_bytes = _square_pad(cut, size=cell_size) if do_pad else cut
+                    isolated = True
+                else:
+                    warnings.append(f"cell {idx + 1}: cutout came back empty; kept the uncut cell")
+            res = await storage.save_result(out_bytes, project=project, subpath=subpath,
                                             filename=f"{base}-{idx + 1}", ext="png", cfg=cfg)
-            res["subject"] = subs[idx]
+            if idx < n:
+                res["subject"] = subs[idx]
+            res["isolated"] = isolated
             results.append(res)
-        gbuf = io.BytesIO(); grid.save(gbuf, "PNG")
-        grid_res = await storage.save_result(gbuf.getvalue(), project=project, subpath=subpath,
+        grid_res = await storage.save_result(sheet, project=project, subpath=subpath,
                                              filename=f"{base}-GRID", ext="png", cfg=cfg)
-        return {"count": len(results), "images": results, "grid_url": grid_res["url"],
-                "cost_note": f"{len(results)} images from 1 Imagen request ({c}x{r} grid)"}
+        out = {"count": len(results), "images": results, "grid_url": grid_res["url"],
+               "engine": eng, "kind": kind,
+               "grid": {k: grid_meta[k] for k in ("cols", "rows", "mode", "mismatch",
+                                                  "snapped_lines", "expected_lines", "inset")},
+               "cost_note": f"{len(results)} images from 1 {eng} request ({c}x{r} grid asked)"}
+        if warnings:
+            out["warnings"] = warnings
+        return out
 
     @mcp.tool()
     async def generate_local(prompt: str, project: str, model: str = "pony",
