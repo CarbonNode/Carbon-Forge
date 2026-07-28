@@ -1,6 +1,7 @@
 """Audio / TTS generation. Two providers: ElevenLabs (cloud, expressive, large voice
 library) and Chatterbox (local, on the 4090 GPU container(s) — free, on-prem, zero-shot
-voice cloning; primary→overflow routing, yields while gaming)."""
+voice cloning; primary→overflow routing, yields only while the GPU is actually busy —
+someone merely being at the box does not block a synth)."""
 
 from forge_mcp import generation as g
 from forge_mcp import storage
@@ -23,7 +24,8 @@ def register(mcp, ctx):
           - 'elevenlabs' (default) — cloud, expressive, large prebuilt voice library + cloning.
             Needs ELEVENLABS_API_KEY on the service. Use list_voices() to discover voice ids.
           - 'chatterbox' — local, on the 4090 GPU container(s); free, on-prem, zero-shot
-            voice cloning + emotion control. Routes primary→overflow, yields while gaming.
+            voice cloning + emotion control. Routes primary→overflow; yields only while
+            the GPU is genuinely busy (util >= 50% or VRAM full), never on mere presence.
         voice: for elevenlabs = voice_id (omit → the account's own first voice, since free-tier
           keys can't use Voice-Library voices; see list_voices); for chatterbox =
           a workspace path / URL to a reference clip to clone (omit for the default voice).
