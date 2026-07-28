@@ -42,25 +42,40 @@ Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 - **Veo videos** are async: `generate_video` → `job_id`, poll `job_status`. Jobs persist across restarts (in-flight operations resume).
 - **Generation needs `GEMINI_API_KEY`** in the service `.env`; without it those tools return a readable error and everything else works.
 
-## Deploy (hosted service) — super-server since 2026-07-01
-
-Two dirs on **super-server** (192.168.0.197):
-- `C:\Programming\CarbonForge` — the RUNTIME: compose project `carbon-forge` (`docker-compose.yml`, service `forge`, container `carbon-forge-adhoc`, image `carbon-forge-mcp:latest`) + `.env` (gitignored: FORGE_TOKEN, GEMINI keys, ELEVENLABS, CIFS creds, `FORGE_COMFY_URL`/`FORGE_CHATTERBOX_URL` etc. → laybackrig/maingamingrig workers). The CIFS `workspace` volume (`//192.168.0.35/Workspace`) is declared here.
-- `C:\Programming\CarbonForge-src` — the SOURCE: a git checkout tracking `origin/main` (converted 2026-07-28; before that the box had no checkout and builds shipped by copying files — don't regress to that). Never hand-edit it; it exists to be pulled and built.
-
-Deploy a code change (from any Cortex session, via `shell-super_server__exec`):
+## Deploy (hosted service) — one call, automated since 2026-07-28
 
 ```
-1. commit + push to origin/main
-2. git -C C:\Programming\CarbonForge-src pull --ff-only
-3. schtasks /create /tn ForgeGridBuild /tr C:\Programming\CarbonForge-src\build-grid.bat /sc ONCE /st 23:59 /f && schtasks /run /tn ForgeGridBuild
-   (build-grid.bat = docker build -f Dockerfile.mcp -t carbon-forge-mcp . > build-grid.log; poll build-grid.log for BUILD_OK/BUILD_FAIL, then schtasks /delete /tn ForgeGridBuild /f)
-4. docker compose -p carbon-forge -f C:\Programming\CarbonForge\docker-compose.yml up -d forge   (recreates onto the new image; MCP sessions reconnect in seconds)
+commit + push to origin/main, then:  deployer__ship {project: "carbon-forge"}
 ```
 
-⚠️ `docker build` from a non-interactive shell can hang on the Windows credential helper when a base image needs pulling — the one-shot scheduled task (interactive session) sidesteps it; `start /b` does NOT work through the agent shell. Take a `deploy-coordinator` lease on `super_server:carbon-forge` around steps 3-4. The old laybackrig checkout (`C:\Programming\CarbonForge` on 192.168.0.177) is SUNSET for the API — it still hosts the GPU worker stacks (ComfyUI :8188, Chatterbox :5126, Trellis :8082) and its git tree is stale/ahead — don't build the API there.
+That's the whole deploy. The org deployer (carbon-cortex gateway tool, registered in
+`config/deploy-registry.json`) runs the standard compose-build recipe on super-server:
+deploy-coordinator lease → dirty-tree guard + `git pull --ff-only` on
+`C:\Programming\CarbonForge-src` → interactive scheduled-task `docker compose build forge`
+(sidesteps the Windows credential-helper hang) → `up -d --no-deps forge` → health check →
+release. Poll `deployer__ship_status {job_id}` until ok/failed. Dry-run with
+`deployer__explain {project: "carbon-forge"}`.
 
-**Verify after deploy:** `https://forge.carbonrouting.dev/health` → 200; `docker exec carbon-forge-adhoc sh -c "grep -c <new symbol> /app/forge_mcp/<file>"` (a stale image is silent); then exercise a changed tool live through the gateway (`forge__*`).
+Topology on **super-server** (192.168.0.197):
+- `C:\Programming\CarbonForge-src` — the git checkout (tracks `origin/main`) that OWNS the
+  stack: the repo's root `docker-compose.yml` (project `carbon-forge`, service `forge`,
+  container `carbon-forge-adhoc`) runs from here. `.env` sits beside it (gitignored:
+  FORGE_TOKEN, GEMINI keys, ELEVENLABS, CIFS creds, `FORGE_COMFY_URL`/`FORGE_CHATTERBOX_URL`
+  etc. → laybackrig/maingamingrig GPU workers; the CIFS `workspace` volume interpolates
+  `CIFS_USERNAME`/`CIFS_PASSWORD` from it). Never hand-edit the checkout — push, then ship.
+- `C:\Programming\CarbonForge` — legacy runtime dir; keeps the master `.env` backup and the
+  superseded pre-adoption compose. Nothing runs from it anymore.
+
+Notes: a recreate drops forge MCP sessions for a few seconds (they reconnect), and gateway
+MCP sessions opened BEFORE the deploy keep serving the old forge tool schemas (new tool
+params get silently stripped) until they reconnect — new sessions are fine. The old
+laybackrig checkout (192.168.0.177 `C:\Programming\CarbonForge`) is SUNSET for the API — it
+still hosts the GPU worker stacks (ComfyUI :8188, Chatterbox :5126, Trellis :8082) and its
+git tree is stale/ahead; don't build the API there.
+
+**Verify after deploy:** ship_status ends `ok`; `docker exec carbon-forge-adhoc sh -c
+"grep -c <new symbol> /app/forge_mcp/<file>"` (a stale image is silent); then exercise a
+changed tool live (`forge__*`).
 
 ## Audio / TTS (two providers)
 
