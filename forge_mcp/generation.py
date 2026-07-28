@@ -310,8 +310,13 @@ async def list_elevenlabs_voices(client, api_key) -> list:
 
 
 # ---- Local Chatterbox TTS (isolated GPU container; see chatterbox_service/) ----
-# Same primary→overflow, presence-yield routing as ComfyUI, but over the Chatterbox
-# /tts HTTP endpoints. box_gaming() (defined below) is resolved at call time.
+# Same primary→overflow routing as ComfyUI, but over the Chatterbox /tts HTTP
+# endpoints — with a LIGHTER yield policy than box_gaming(): a TTS synth is a
+# seconds-long ~4GB burst (CHIM runs them mid-game nonstop), so a human merely
+# being AT the box must not block it. Only real GPU contention yields.
+
+TTS_MIN_FREE_VRAM_MB = 4500  # below this headroom a cold model load would OOM
+
 
 async def chatterbox_reachable(client, url, timeout=4.0) -> bool:
     if not url:
@@ -323,23 +328,50 @@ async def chatterbox_reachable(client, url, timeout=4.0) -> bool:
         return False
 
 
+async def tts_busy_reason(client, presence_url, timeout=3.0) -> str | None:
+    """TTS variant of box_gaming(): ignores `present` (someone at the box is fine) and
+    yields only on actual contention — GPU util >= GAMING_UTIL_PCT, or too little free
+    VRAM to hold the model. Returns a human-readable reason, or None when the box can
+    take the job. Fail-OPEN like box_gaming (unset/unreachable presence → free)."""
+    if not presence_url:
+        return None
+    try:
+        d = (await client.get(presence_url.rstrip("/"), timeout=timeout)).json()
+    except (httpx.HTTPError, ValueError):
+        return None
+    u = d.get("util")
+    if isinstance(u, (int, float)) and u >= GAMING_UTIL_PCT:
+        return f"GPU under load ({u:.0f}%)"
+    used, total = d.get("mem_used"), d.get("mem_total")
+    if isinstance(used, (int, float)) and isinstance(total, (int, float)) and total > 0:
+        free = total - used
+        if free < TTS_MIN_FREE_VRAM_MB:
+            return f"VRAM full ({free:.0f}MB free)"
+    return None
+
+
 async def select_chatterbox(client, cfg) -> tuple[str | None, str]:
-    """Pick a Chatterbox backend: primary unless its box is gamed-on/unreachable, then
-    overflow. Reuses the ComfyUI presence endpoints (same boxes). (url, label) or (None, reason)."""
+    """Pick a Chatterbox backend: primary unless unreachable or genuinely busy
+    (tts_busy_reason), then overflow. Reuses the ComfyUI presence endpoints (same
+    boxes). Returns (url, label), or (None, per-backend human-readable reason)."""
     candidates = [
         (cfg.chatterbox_url, cfg.comfy_presence_url, "laybackrig"),
         (cfg.chatterbox_overflow_url, cfg.comfy_overflow_presence_url, "maingamingrig"),
     ]
-    reachable = []
+    detail = []
     for url, presence, label in candidates:
+        if not url:
+            continue
         if not await chatterbox_reachable(client, url):
+            detail.append(f"{label} unreachable (service down or box off)")
             continue
-        if await box_gaming(client, presence):
+        busy = await tts_busy_reason(client, presence)
+        if busy:
+            detail.append(f"{label} {busy}")
             continue
-        reachable.append((url, label))
-    if reachable:
-        return reachable[0]
-    return None, "no reachable Chatterbox backend (unreachable, or the box is gaming)"
+        return url, label
+    why = "; ".join(detail) or "no Chatterbox backend configured"
+    return None, f"{why} — retry when the GPU frees, or use provider='elevenlabs'"
 
 
 async def call_chatterbox(client, url, text, *, exaggeration=0.5, cfg_weight=0.5,
