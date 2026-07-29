@@ -161,6 +161,15 @@ async def create_prediction(client, token, model: str, input: dict, wait: int = 
         url, body = f"{API}/models/{model}/predictions", {"input": input}
     try:
         resp = await client.post(url, json=body, headers=headers, timeout=90)
+        if resp.status_code in (404, 422) and ":" not in model:
+            # a few models reject the latest-version endpoint — resolve the latest
+            # version and pin it explicitly (404/422 = rejected before running, so
+            # this can't double-charge)
+            version = ((await get_model(client, token, model)).get("latest_version") or {}).get("id")
+            if version:
+                resp = await client.post(f"{API}/predictions",
+                                         json={"version": version, "input": input},
+                                         headers=headers, timeout=90)
     except httpx.HTTPError as e:
         raise GenerationError(f"Replicate request failed: {e}") from e
     if resp.status_code >= 400:
