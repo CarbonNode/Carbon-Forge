@@ -1,4 +1,4 @@
-from forge_mcp.tools import audio, extract, gen, meta, proc, prompts, util, vid
+from forge_mcp.tools import audio, extract, gen, meta, proc, prompts, replicate, util, vid
 
 
 def register_all(mcp, ctx):
@@ -7,5 +7,6 @@ def register_all(mcp, ctx):
     vid.register(mcp, ctx)
     audio.register(mcp, ctx)
     extract.register(mcp, ctx)
+    replicate.register(mcp, ctx)
     util.register(mcp, ctx)
     meta.register(mcp, ctx)

@@ -84,6 +84,19 @@ changed tool live (`forge__*`).
 - **`provider='elevenlabs'`** (default) — cloud, expressive, large voice library + cloning. Needs `ELEVENLABS_API_KEY` in the forge `.env`. ⚠️ Free-tier keys **cannot use Voice-Library voices** via the API (HTTP 402); omit `voice` and it defaults to the account's **own first voice** (`_default_eleven_voice` in `generation.py`), or pass a `voice_id` from `list_voices()` whose category is `premade`/`cloned`.
 - **`provider='chatterbox'`** — local, free, on-prem; zero-shot voice cloning (`voice` = a workspace clip/URL) + emotion control (`exaggeration`, `cfg_weight`). Runs as its **own isolated GPU container** (`chatterbox` service, `Dockerfile.chatterbox`, `chatterbox_service/server.py`, FastAPI on :5126) — kept separate from ComfyUI so its pinned `transformers==4.46.3` can't conflict with the image/video stack (transformers 5.x). Forge routes primary→overflow across boxes (`select_chatterbox` in `generation.py`, reusing the ComfyUI presence/yield endpoints) and yields while a box is being gamed on. Deploy it like `forge`: `docker compose -f docker-compose.forge.yml build chatterbox` + `up -d chatterbox` (first request lazy-loads + caches the model into the `chatterbox-models` volume). Second box (maingamingrig) runs its own `chatterbox` container; set `FORGE_CHATTERBOX_OVERFLOW_URL` in the forge `.env`.
 
+## Replicate (the whole catalog, three tools)
+
+`replicate_search(query)` finds any of Replicate's thousands of hosted models;
+`replicate_model('owner/name')` returns its input schema (call it before running);
+`replicate_run(model, input, project, files?)` runs it — every file output is saved into the
+project workspace like any other forge tool, text outputs (LLMs) come back as `output_text`,
+and runs that outlast `wait_seconds` (max 300) return a `job_id` to poll with `job_status`.
+`files` maps input-field names to workspace paths / URLs (uploaded through Replicate's files
+API — for img2img, upscalers, transcription, …). `model` accepts `owner/name` (latest) or
+`owner/name:version` (pinned). Needs `REPLICATE_API_TOKEN` in the service `.env` (org account
+`carbonnode`); billed per run — image models are typically sub-cent, video models $0.10+.
+Source: `forge_mcp/replicate_api.py` (HTTP client, no SDK) + `forge_mcp/tools/replicate.py`.
+
 ## Supporting infrastructure (touch points outside this repo)
 
 | Piece | Where | Notes |

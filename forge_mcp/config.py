@@ -22,6 +22,7 @@ class Config:
     token: str
     gemini_api_key: str
     elevenlabs_api_key: str            # cloud TTS (generate_speech provider='elevenlabs')
+    replicate_api_token: str           # Replicate catalog (replicate_search/_model/_run)
     comfy_url: str
     comfy_presence_url: str            # primary box (laybackrig) gpu-status (:11435) — yield it to chim (high GPU util)
     comfy_overflow_url: str            # 2nd ComfyUI (e.g. maingamingrig) for overflow when primary is busy/gaming
@@ -46,6 +47,7 @@ def load_config() -> Config:
         token=os.environ.get("FORGE_TOKEN", ""),
         gemini_api_key=gkeys[0] if gkeys else "",
         elevenlabs_api_key=os.environ.get("ELEVENLABS_API_KEY", ""),
+        replicate_api_token=os.environ.get("REPLICATE_API_TOKEN", ""),
         comfy_url=os.environ.get("FORGE_COMFY_URL", "").rstrip("/"),
         comfy_presence_url=os.environ.get("FORGE_COMFY_PRESENCE_URL", "http://host.docker.internal:11435").rstrip("/"),
         comfy_overflow_url=os.environ.get("FORGE_COMFY_OVERFLOW_URL", "").rstrip("/"),
