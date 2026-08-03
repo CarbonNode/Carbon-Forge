@@ -150,3 +150,14 @@ def test_save_bundle_missing_project_keeps_cache(tmp_path):
                                           subpath=None, cfg=cfg))
     assert "workspace_write_error" in out
     assert list(out["files"]) == ["a.png"]
+
+
+# ---- world_prompt ----
+
+def test_world_prompt_style_leads():
+    p = worldgen.world_prompt("a spooky forest village")
+    assert p.startswith("A 16-bit pixel art")
+    assert "a spooky forest village" in p
+    assert "screenshot of a 2D game" in p
+    p2 = worldgen.world_prompt("a beach", "watercolor storybook illustration")
+    assert p2.startswith("A watercolor storybook illustration")

@@ -23,12 +23,22 @@ DETECT_MAX_SIDE = 1536  # detection copy is downscaled; boxes are normalized so 
 CATEGORIES = ("obstacle", "decor", "enterable", "zone_blocked")
 
 DEFAULT_WORLD_STYLE = (
-    "hand-painted 16-bit pixel art, 2D three-quarter top-down RPG view "
-    "(Stardew Valley / Eastward lineage), soft baked lighting with hard-edged "
-    "cast shadows, cohesive limited palette, richly detailed, no characters, "
-    "no people, no animals, no text, no watermark, no UI, full scene filling "
-    "the frame edge to edge"
+    "16-bit pixel art, hand-painted in the style of Stardew Valley and Eastward, "
+    "three-quarter top-down RPG perspective"
 )
+
+
+def world_prompt(scene: str, style: str = DEFAULT_WORLD_STYLE) -> str:
+    """Style-locked map prompt. The style MUST lead and the frame must read as a
+    game screenshot — trailing style descriptors after 'top-down map' get ignored
+    and Imagen drifts to a photorealistic aerial photo (observed live)."""
+    return (
+        f"A {style} video game world map, screenshot of a 2D game. "
+        f"The map depicts {scene.strip()}. "
+        "Soft baked lighting with hard-edged cast shadows, cohesive limited palette, "
+        "richly detailed. No characters, no people, no animals, no text, no watermark, "
+        "no UI. The scene fills the entire frame edge to edge."
+    )
 
 _DETECT_SCHEMA = {
     "type": "object",

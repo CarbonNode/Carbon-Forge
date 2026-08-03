@@ -125,10 +125,8 @@ def register(mcp, ctx):
         else:
             if aspect_ratio not in g.IMAGE_ASPECTS:
                 raise g.GenerationError(f"aspect_ratio must be one of {g.IMAGE_ASPECTS}")
-            styled = prompt.strip()
             wrapper = worldgen.DEFAULT_WORLD_STYLE if style is None else style.strip()
-            if wrapper:
-                styled = f"A complete top-down game map of {styled}. {wrapper}"
+            styled = worldgen.world_prompt(prompt, wrapper) if wrapper else prompt.strip()
             images = await g.call_imagen(ctx.http, cfg.gemini_api_keys,
                                          g.resolve_image_model(model), styled,
                                          sample_count=1, aspect_ratio=aspect_ratio)
