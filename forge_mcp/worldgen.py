@@ -215,28 +215,37 @@ def build_collision(objects, cols: int = 64, rows: int = 36, band_frac: float = 
 
     obstacle: only its footprint band blocks — the bottom `band_frac` of the box
     (min 10 units tall), so characters walk behind canopies/roofs but collide at
-    the base. zone_blocked: the whole box blocks. decor/enterable: walkable.
+    the base. zone_blocked: the whole box blocks. decor: walkable. enterable:
+    CARVES an opening — its cells (plus a small approach apron below) are
+    unblocked LAST, so a door in a building's facade stays reachable and the
+    player can actually step into its transition trigger (a door buried in its
+    building's footprint band soft-locked the world, observed live).
     Returns {cols, rows, blocked: sorted [cell_index...]} (index = row * cols + col).
     """
     cols, rows = max(8, int(cols)), max(8, int(rows))
-    blocked = set()
-    for obj in objects:
-        y1, x1, y2, x2 = obj["box_2d"]
-        if obj["category"] == "obstacle":
-            band_top = max(y1, y2 - max(10, int((y2 - y1) * band_frac)))
-            region = (band_top, x1, y2, x2)
-        elif obj["category"] == "zone_blocked":
-            region = (y1, x1, y2, x2)
-        else:
-            continue
-        ry1, rx1, ry2, rx2 = region
+
+    def cells(ry1, rx1, ry2, rx2):
         c1 = max(0, min(cols - 1, int(rx1 * cols / 1000)))
         c2 = max(0, min(cols - 1, int((rx2 - 1) * cols / 1000)))
         r1 = max(0, min(rows - 1, int(ry1 * rows / 1000)))
         r2 = max(0, min(rows - 1, int((ry2 - 1) * rows / 1000)))
         for r in range(r1, r2 + 1):
             for c in range(c1, c2 + 1):
-                blocked.add(r * cols + c)
+                yield r * cols + c
+
+    blocked = set()
+    for obj in objects:
+        y1, x1, y2, x2 = obj["box_2d"]
+        if obj["category"] == "obstacle":
+            band_top = max(y1, y2 - max(10, int((y2 - y1) * band_frac)))
+            blocked.update(cells(band_top, x1, y2, x2))
+        elif obj["category"] == "zone_blocked":
+            blocked.update(cells(y1, x1, y2, x2))
+    for obj in objects:
+        if obj["category"] != "enterable":
+            continue
+        y1, x1, y2, x2 = obj["box_2d"]
+        blocked.difference_update(cells(y1, x1, min(1000, y2 + 30), x2))
     return {"cols": cols, "rows": rows, "blocked": sorted(blocked)}
 
 

@@ -77,6 +77,20 @@ def test_collision_zone_blocks_fully_and_decor_never():
     assert all(i % 10 < 5 for i in grid["blocked"])
 
 
+def test_collision_enterable_carves_door_through_obstacle():
+    objects = [
+        # building whose footprint band is the bottom rows
+        {"label": "tavern", "category": "obstacle", "box_2d": [0, 0, 1000, 1000]},
+        # door in the middle of the facade
+        {"label": "tavern_door", "category": "enterable", "box_2d": [800, 400, 1000, 600]},
+    ]
+    grid = worldgen.build_collision(objects, cols=10, rows=10, band_frac=0.30)
+    # door columns (4-5) are carved open in the footprint rows; others stay blocked
+    blocked_cols_bottom = {i % 10 for i in grid["blocked"] if i // 10 == 8}
+    assert 4 not in blocked_cols_bottom and 5 not in blocked_cols_bottom
+    assert 0 in blocked_cols_bottom and 9 in blocked_cols_bottom
+
+
 def test_collision_indices_in_range():
     objects = [{"label": "wall", "category": "zone_blocked", "box_2d": [990, 990, 1000, 1000]}]
     grid = worldgen.build_collision(objects, cols=64, rows=36)
