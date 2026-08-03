@@ -254,3 +254,65 @@ def test_world_prompt_style_leads():
     assert "screenshot of a 2D game" in p
     p2 = worldgen.world_prompt("a beach", "watercolor storybook illustration")
     assert p2.startswith("A watercolor storybook illustration")
+
+
+# ---- sprite triage + masks + QA ----
+
+def test_needs_occlusion_sprite_triage():
+    tall = {"label": "tree", "category": "obstacle", "box_2d": [100, 100, 300, 200]}
+    short = {"label": "basket", "category": "obstacle", "box_2d": [500, 500, 540, 560]}
+    door = {"label": "door", "category": "enterable", "box_2d": [0, 0, 500, 500]}
+    assert worldgen.needs_occlusion_sprite(tall)
+    assert not worldgen.needs_occlusion_sprite(short)
+    assert not worldgen.needs_occlusion_sprite(door)
+    assert worldgen.needs_occlusion_sprite(short, min_height=30)
+
+
+def test_accumulate_mask_union_containment():
+    import numpy as np
+    box = (10, 10, 30, 30)  # left, top, right, bottom
+    inside = np.zeros((40, 40), bool); inside[12:28, 12:28] = True
+    outside = np.zeros((40, 40), bool); outside[0:40, 0:8] = True
+    straddling = np.zeros((40, 40), bool); straddling[0:40, 5:35] = True  # <75% inside
+    union = worldgen.accumulate_mask_union(None, inside, box)
+    assert union is not None and union.shape == (20, 20)
+    assert worldgen.accumulate_mask_union(union, outside, box) is union  # rejected
+    assert worldgen.accumulate_mask_union(union, straddling, box) is union  # rejected
+    assert 0.6 < worldgen.union_coverage(union, box) < 0.7  # 16x16 of 20x20
+    assert worldgen.union_coverage(None, box) == 0.0
+
+
+def test_apply_mask_alpha_same_canvas():
+    import numpy as np
+    from io import BytesIO as B
+    from PIL import Image
+    im = Image.new("RGB", (20, 20), (10, 200, 10))
+    buf = B(); im.save(buf, "PNG")
+    union = np.zeros((20, 20), bool); union[5:15, 5:15] = True
+    out = Image.open(B(worldgen.apply_mask_alpha(buf.getvalue(), union)))
+    assert out.size == (20, 20)
+    a = np.array(out)[:, :, 3]
+    assert a[10, 10] == 255 and a[0, 0] == 0
+
+
+def test_composite_on_magenta_flattens():
+    from io import BytesIO as B
+    from PIL import Image
+    im = Image.new("RGBA", (600, 20), (0, 0, 0, 0))
+    buf = B()
+    im.save(buf, "PNG")
+    out = Image.open(B(worldgen.composite_on_magenta(buf.getvalue())))
+    assert out.mode == "RGB" and max(out.size) <= 384
+    assert out.getpixel((0, 0)) == (255, 0, 255)
+
+
+def test_parse_verdicts_defensive():
+    raw = {"verdicts": [
+        {"index": 0, "verdict": "clipped"},
+        {"index": 2, "verdict": "contaminated"},
+        {"index": 9, "verdict": "empty"},        # out of range
+        {"index": 1, "verdict": "gibberish"},    # unknown verdict
+        "junk",
+    ]}
+    assert worldgen.parse_verdicts(raw, 3) == ["clipped", "clean", "contaminated"]
+    assert worldgen.parse_verdicts({}, 2) == ["clean", "clean"]

@@ -127,8 +127,17 @@ playable by cutting it apart.
   objects, collision}}}`, enterables carry `link {to, spawn}`) + playable `preview.html`
   (follow camera + lerp, map transitions with fade + 1s cooldown, WASD/drag, G =
   collision + door triggers, Z = zoom cycle).
+- **Sprite polish (default-on)**: TRIAGE — only tall obstacles (`needs_occlusion_sprite`,
+  `min_sprite_height` 70 normalized units) become occlusion sprites; short props stay
+  painted in the background (renders perfectly) + collision only. MASKS — one `meta/sam-2`
+  automatic-segmentation run per map via `replicate_api` (masks streamed one at a time and
+  containment-folded into each candidate's crop union — peak memory one full-map mask;
+  ≥30% box coverage required, else rembg fallback; no REPLICATE_API_TOKEN → all rembg).
+  QA — batched Gemini judge on magenta composites (`judge_sprites`, ≤14/call): clean /
+  clipped (one retry with wider crop) / contaminated / empty (both demoted to
+  background-only). Per-map counts in the result's `sprite_stats`.
 - `segment_scene(image, project, …)` — detection + in-place cutouts only, for any art
-  (emits a single-map v2 manifest, no collision/preview).
+  (emits a single-map v2 manifest, no collision/preview; SAM+QA yes, triage no).
 - Bundles use `storage.save_bundle` — ONE cache id for sibling files (preview.html
   relative refs work at the URL and in the workspace copy, which skips unique-suffixing).
   The `/files/{id}/{name}` route is flat: bundle filenames must not contain `/`.

@@ -259,6 +259,153 @@ def build_collision(objects, cols: int = 64, rows: int = 36, band_frac: float = 
     return {"cols": cols, "rows": rows, "blocked": sorted(blocked)}
 
 
+# ---- sprite triage + masks + QA ----
+
+MIN_SPRITE_HEIGHT = 70  # normalized units; shorter obstacles are background-only + collision
+
+
+def needs_occlusion_sprite(obj, min_height: int = MIN_SPRITE_HEIGHT) -> bool:
+    """Only TALL obstacles need cutout sprites — a player can visibly stand behind a
+    tree or a building, never behind a basket. Small props stay painted into the
+    background (which renders them perfectly) and keep only their collision, which
+    eliminates their clipping risk entirely."""
+    if obj["category"] != "obstacle":
+        return False
+    y1, _x1, y2, _x2 = obj["box_2d"]
+    return (y2 - y1) >= min_height
+
+
+def accumulate_mask_union(union, mask, box_px, contain_thresh: float = 0.75):
+    """Fold one SAM mask into a sprite's alpha union if the mask lives mostly inside
+    the sprite's crop box. `mask` is a bool ndarray (H, W) at full map resolution;
+    `union` is a bool ndarray shaped to the crop (or None). Returns the new union.
+    Streaming (one mask at a time) keeps peak memory at one full-map mask."""
+    left, top, right, bottom = box_px
+    total = int(mask.sum())
+    if total < 24:
+        return union
+    inside = int(mask[top:bottom, left:right].sum())
+    if inside / total < contain_thresh:
+        return union
+    piece = mask[top:bottom, left:right]
+    if union is None:
+        return piece.copy()
+    union |= piece
+    return union
+
+
+def union_coverage(union, box_px) -> float:
+    """How much of the crop box the accumulated union explains (0-1)."""
+    if union is None:
+        return 0.0
+    left, top, right, bottom = box_px
+    area = max(1, (right - left) * (bottom - top))
+    return float(union.sum()) / area
+
+
+def apply_mask_alpha(crop_png: bytes, union) -> bytes:
+    """Apply a bool mask as the crop's alpha channel (1px dilation + soft edge so the
+    matte doesn't shave the outline)."""
+    import numpy as np
+    from PIL import Image
+    from scipy.ndimage import binary_dilation, gaussian_filter
+    im = Image.open(BytesIO(crop_png)).convert("RGBA")
+    mask = binary_dilation(union, iterations=1)
+    alpha = gaussian_filter(mask.astype("float32"), sigma=0.7)
+    alpha = np.clip(alpha * 1.4, 0.0, 1.0)
+    arr = np.array(im)
+    arr[:, :, 3] = (alpha * 255).astype("uint8")
+    return _png_bytes(Image.fromarray(arr))
+
+
+def composite_on_magenta(sprite_png: bytes, max_side: int = 384) -> bytes:
+    """Flatten a transparent sprite onto magenta for the QA judge (alpha holes and
+    contamination both read clearly against it), downscaled to keep the call cheap."""
+    from PIL import Image
+    im = Image.open(BytesIO(sprite_png)).convert("RGBA")
+    if max(im.size) > max_side:
+        scale = max_side / max(im.size)
+        im = im.resize((max(1, int(im.width * scale)), max(1, int(im.height * scale))),
+                       Image.LANCZOS)
+    bg = Image.new("RGBA", im.size, (255, 0, 255, 255))
+    bg.alpha_composite(im)
+    return _png_bytes(bg.convert("RGB"))
+
+
+def _png_bytes(im) -> bytes:
+    buf = BytesIO()
+    im.save(buf, "PNG")
+    return buf.getvalue()
+
+
+QA_VERDICTS = ("clean", "clipped", "contaminated", "empty")
+
+_QA_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "verdict": {"type": "string", "enum": list(QA_VERDICTS)},
+                },
+                "required": ["index", "verdict"],
+            },
+        },
+    },
+    "required": ["verdicts"],
+}
+
+_QA_PROMPT = """Each image is a cutout video-game sprite composited on a MAGENTA background,
+numbered in the order given, starting at index 0. The expected object for each index:
+{labels}
+
+Judge every image:
+- clean: one complete object (its attached cast shadow is fine).
+- clipped: the object is visibly cut off at the crop edge (missing top/side).
+- contaminated: large parts of OTHER objects or of the ground/scenery are included.
+- empty: no recognizable object (mostly magenta).
+
+Return a verdict for every index."""
+
+
+async def judge_sprites(http, api_keys, sprites: list, labels: list,
+                        model: str = DETECT_MODEL) -> list:
+    """Batch-QA sprite cutouts with Gemini. sprites: list of magenta-composited PNG
+    bytes. Returns one verdict per sprite ('clean' when the judge skipped one)."""
+    parts = [{"inlineData": {"mimeType": "image/png", "data": base64.b64encode(b).decode()}}
+             for b in sprites]
+    label_lines = "\n".join(f"{i}: {lab}" for i, lab in enumerate(labels))
+    parts.append({"text": _QA_PROMPT.format(labels=label_lines)})
+    url = f"{g.GEMINI_API}/models/{model}:generateContent"
+    body = {"contents": [{"parts": parts}],
+            "generationConfig": {"responseMimeType": "application/json",
+                                 "responseSchema": _QA_SCHEMA}}
+    resp = await g._gemini_fetch(http, url, api_keys, body)
+    candidates = resp.get("candidates") or []
+    rparts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
+    text = "".join(p.get("text", "") for p in rparts if isinstance(p, dict))
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        raw = {}
+    return parse_verdicts(raw, len(sprites))
+
+
+def parse_verdicts(raw: dict, count: int) -> list:
+    """Defensive parse: every sprite gets a verdict; unknown/missing -> 'clean'."""
+    out = ["clean"] * count
+    for v in (raw.get("verdicts") or []):
+        if not isinstance(v, dict):
+            continue
+        idx, verdict = v.get("index"), v.get("verdict")
+        if isinstance(idx, int) and 0 <= idx < count and verdict in QA_VERDICTS:
+            out[idx] = verdict
+    return out
+
+
 # ---- multi-map linking ----
 
 def pick_expandable(objects, limit: int) -> list:
