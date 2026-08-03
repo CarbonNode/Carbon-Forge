@@ -106,21 +106,34 @@ The capybara.build workflow (documented in Potion `research/capybara-build/`): p
 WHOLE scene as one image (perfect internal consistency, baked lighting), then make it
 playable by cutting it apart.
 
-- `generate_world(prompt, project, …)` — Imagen paints the map (default style wrapper =
-  hand-painted 16-bit top-down RPG; `style=""` disables, `image=` skips generation) →
-  Gemini Flash structured detection labels objects (`obstacle` / `zone_blocked` /
-  `enterable` / `decor`, box_2d `[ymin,xmin,ymax,xmax]` normalized 0-1000, y-first — kept
-  end-to-end) → obstacle crops are alpha-cut IN PLACE by the shared rembg engine
-  (`auto_trim=False`; `crop_px` in the manifest redraws them exactly, so mask-edge quality
-  only affects occlusion silhouettes) → collision grid from obstacle FOOTPRINT BANDS
-  (bottom `band_frac`; characters walk behind canopies, collide at the base;
-  `zone_blocked` blocks fully) → bundle: `map.png` + `sprite_*.png` + `world.json` +
-  playable `preview.html` (WASD/drag walker, G = collision grid).
-- `segment_scene(image, project, …)` — detection + in-place cutouts only, for any art.
+- `generate_world(prompt, project, …)` — Imagen paints the outdoor map (style wrapper via
+  `worldgen.world_prompt` — the style MUST LEAD or Imagen drifts photorealistic;
+  `style=""` disables, `image=` skips generation) → optional ESRGAN 2x on a pool GPU
+  (`upscale`, graceful skip) → Gemini Flash structured detection labels objects
+  (`obstacle` / `zone_blocked` / `enterable` / `decor`, box_2d `[ymin,xmin,ymax,xmax]`
+  normalized 0-1000, y-first — kept end-to-end) → obstacle crops alpha-cut IN PLACE by
+  the shared rembg engine (`auto_trim=False`; `crop_px` redraws them exactly, so
+  mask-edge quality only affects occlusion silhouettes) → collision grid from obstacle
+  FOOTPRINT BANDS (bottom `band_frac`; walk behind canopies, collide at the base;
+  `zone_blocked` blocks fully) → **explorable expansion**: the largest
+  `expand_enterables` doors (default 3) each get a style-matched INTERIOR map painted by
+  `call_gemini_image` with the exterior as the reference image, run through the same
+  pipeline, and linked both ways (door → interior entry spawn; interior bottom door or a
+  synthesized exit strip → back just below the exterior door). With expansion the tool
+  returns `{job_id}` and runs as an async JOB (JobStore, `kind="world"`; result in
+  job_status `results[0]`); `expand_enterables=0` is synchronous.
+- Bundle: `map_<key>.png` + `sprite_<key>_<label>.png` + `world.json`
+  (format `carbon-forge-world/2`: `{start, maps: {key: {map, width, height, player_spawn,
+  objects, collision}}}`, enterables carry `link {to, spawn}`) + playable `preview.html`
+  (follow camera + lerp, map transitions with fade + 1s cooldown, WASD/drag, G =
+  collision + door triggers, Z = zoom cycle).
+- `segment_scene(image, project, …)` — detection + in-place cutouts only, for any art
+  (emits a single-map v2 manifest, no collision/preview).
 - Bundles use `storage.save_bundle` — ONE cache id for sibling files (preview.html
   relative refs work at the URL and in the workspace copy, which skips unique-suffixing).
   The `/files/{id}/{name}` route is flat: bundle filenames must not contain `/`.
-- Costs ~one Imagen call + one Gemini Flash detection; cutouts/collision are local CPU.
+- Costs ~one Imagen + one Gemini image edit per interior + one detection per map (cents);
+  cutouts/collision are local CPU, upscale uses the ComfyUI pool.
 
 ## Supporting infrastructure (touch points outside this repo)
 

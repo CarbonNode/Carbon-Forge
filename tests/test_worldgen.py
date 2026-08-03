@@ -83,40 +83,104 @@ def test_collision_indices_in_range():
     assert grid["blocked"] and all(0 <= i < 64 * 36 for i in grid["blocked"])
 
 
-# ---- manifest + preview ----
+# ---- manifest (v2) + preview ----
 
-def _manifest():
-    objects = [
+def _world_manifest():
+    main_objects = [
         {"label": "well", "category": "obstacle", "box_2d": [100, 100, 300, 200]},
+        {"label": "shed_door", "category": "enterable", "box_2d": [200, 400, 300, 500],
+         "link": {"to": "shed", "spawn": [880, 500]}},
         {"label": "path", "category": "decor", "box_2d": [0, 0, 1000, 1000]},
     ]
-    sprites = {"well": {"file": "sprite_well.png", "crop_px": [90, 95, 310, 205]}}
-    grid = worldgen.build_collision(objects, cols=16, rows=9)
-    return worldgen.build_manifest("test-world", "map.png", 1600, 900,
-                                   objects, [500, 500], grid, sprites)
+    sprites = {"well": {"file": "sprite_main_well.png", "crop_px": [90, 95, 310, 205]}}
+    grid = worldgen.build_collision(main_objects, cols=16, rows=9)
+    main = worldgen.build_map_entry("map_main.png", 1600, 900, main_objects,
+                                    [500, 500], grid, sprites)
+    shed_objects = [
+        {"label": "exit_door", "category": "enterable", "box_2d": [900, 400, 1000, 600],
+         "link": {"to": "main", "spawn": [330, 450]}},
+    ]
+    shed = worldgen.build_map_entry("map_shed.png", 1408, 768, shed_objects, [880, 500], None)
+    return worldgen.build_world_manifest("test-world", {"main": main, "shed": shed})
 
 
-def test_manifest_wires_sprites_and_collision():
-    m = _manifest()
-    assert m["format"] == "carbon-forge-world/1"
-    well = next(o for o in m["objects"] if o["label"] == "well")
-    assert well["sprite"] == "sprite_well.png"
+def test_manifest_v2_wires_sprites_links_collision():
+    m = _world_manifest()
+    assert m["format"] == "carbon-forge-world/2"
+    assert m["start"] == "main"
+    main = m["maps"]["main"]
+    well = next(o for o in main["objects"] if o["label"] == "well")
+    assert well["sprite"] == "sprite_main_well.png"
     assert well["crop_px"] == [90, 95, 310, 205]
-    path = next(o for o in m["objects"] if o["label"] == "path")
-    assert "sprite" not in path
-    assert m["collision"]["cols"] == 16
-    assert m["player_spawn"] == [500, 500]
+    door = next(o for o in main["objects"] if o["label"] == "shed_door")
+    assert door["link"] == {"to": "shed", "spawn": [880, 500]}
+    path = next(o for o in main["objects"] if o["label"] == "path")
+    assert "sprite" not in path and "link" not in path
+    assert main["collision"]["cols"] == 16
+    exit_door = m["maps"]["shed"]["objects"][0]
+    assert exit_door["link"]["to"] == "main"
+
+
+def test_manifest_start_falls_back_to_first_map():
+    entry = worldgen.build_map_entry("map_x.png", 100, 100, [], None, None)
+    m = worldgen.build_world_manifest("w", {"cave": entry}, start="main")
+    assert m["start"] == "cave"
 
 
 def test_preview_embeds_manifest_and_relative_refs():
-    html = worldgen.render_preview_html(_manifest())
-    assert "sprite_well.png" in html
-    assert '"map.png"' in html
+    html = worldgen.render_preview_html(_world_manifest())
+    assert "sprite_main_well.png" in html
+    assert '"map_main.png"' in html and '"map_shed.png"' in html
     assert "__WORLD_JSON__" not in html
     # embedded JSON must round-trip
     start = html.index("const WORLD = ") + len("const WORLD = ")
     end = html.index(";\n", start)
     assert json.loads(html[start:end])["name"] == "test-world"
+
+
+# ---- multi-map linking helpers ----
+
+def test_pick_expandable_largest_doors_first():
+    objects = [
+        {"label": "small_door", "category": "enterable", "box_2d": [0, 0, 10, 10]},
+        {"label": "big_door", "category": "enterable", "box_2d": [0, 0, 200, 200]},
+        {"label": "tree", "category": "obstacle", "box_2d": [0, 0, 500, 500]},
+    ]
+    picked = worldgen.pick_expandable(objects, 1)
+    assert [o["label"] for o in picked] == ["big_door"]
+    assert worldgen.pick_expandable(objects, 0) == []
+
+
+def test_map_key_for_strips_door_words():
+    assert worldgen.map_key_for("brewing_shed_door") == "brewing_shed"
+    assert worldgen.map_key_for("tavern_door_2") == "tavern_2"
+    assert worldgen.map_key_for("cave_mouth") == "cave"
+    assert worldgen.map_key_for("door") == "interior"
+
+
+def test_door_return_spawn_below_box():
+    assert worldgen.door_return_spawn([200, 400, 300, 500]) == [330, 450]
+    assert worldgen.door_return_spawn([900, 0, 990, 100]) == [985, 50]  # clamped
+
+
+def test_interior_entry_exit_prefers_bottom_center_door():
+    objects = [
+        {"label": "window", "category": "enterable", "box_2d": [100, 400, 200, 500]},
+        {"label": "exit_door", "category": "enterable", "box_2d": [850, 450, 980, 560]},
+    ]
+    spawn, exit_label = worldgen.interior_entry_exit(objects)
+    assert exit_label == "exit_door"
+    assert spawn == [805, 505]  # just above the door
+
+
+def test_interior_entry_exit_fallback_synthesizes():
+    spawn, exit_label = worldgen.interior_entry_exit(
+        [{"label": "rug", "category": "decor", "box_2d": [400, 400, 600, 600]}])
+    assert exit_label is None
+    assert spawn == [880, 500]
+    exit_obj = worldgen.synthesize_exit()
+    assert exit_obj["category"] == "enterable"
+    assert exit_obj["box_2d"][0] >= 900  # bottom strip
 
 
 # ---- save_bundle ----

@@ -1,6 +1,8 @@
-"""Game-world tools — one generated map image becomes a playable, style-consistent
-world: labeled detections, cutout obstacle sprites, a collision grid, and a
-self-contained playable preview.html (the "capybara.build" workflow)."""
+"""Game-world tools — one generated map image becomes an explorable, style-consistent
+world: labeled detections, cutout obstacle sprites, collision grids, style-matched
+interior maps behind every door, and a self-contained playable preview.html
+(the "capybara.build" workflow)."""
+import asyncio
 import json
 from io import BytesIO
 
@@ -15,10 +17,34 @@ _CUT_OPTS = dict(model="isnet-general-use", edge_smooth=True, edge_strength=60,
 
 def register(mcp, ctx):
     cfg = ctx.cfg
+    jobs = ctx.jobs
 
-    async def _cut_sprites(map_bytes, objects, categories=("obstacle",)):
+    async def _maybe_upscale(map_bytes: bytes):
+        """ESRGAN 4x on a pool GPU, downsampled to 2x (plenty at preview zoom, sane file
+        size). Any failure — no GPU free, box being gamed on — falls back to the native
+        image with a note; the pipeline never dies on fidelity polish."""
+        backends = [
+            {"url": cfg.comfy_url, "presence_url": cfg.comfy_presence_url, "label": "laybackrig"},
+            {"url": cfg.comfy_overflow_url, "presence_url": cfg.comfy_overflow_presence_url,
+             "label": "maingamingrig"},
+        ]
+        try:
+            chosen, sel = await g.select_comfy(ctx.http, backends)
+            if not chosen:
+                return map_bytes, f"skipped ({sel})"
+            up = await g.call_comfy_upscale(ctx.http, chosen, map_bytes)
+            from PIL import Image
+            im = Image.open(BytesIO(up))
+            im = im.resize((max(1, im.width // 2), max(1, im.height // 2)), Image.LANCZOS)
+            buf = BytesIO()
+            im.save(buf, "PNG")
+            return buf.getvalue(), f"esrgan-4x-to-2x@{sel}"
+        except Exception as e:
+            return map_bytes, f"skipped ({e})"
+
+    async def _cut_sprites(map_bytes, objects, key, categories=("obstacle",)):
         """Crop + alpha-cut each object in `categories`. Returns
-        (bundle_files, sprite_files) — sprite_files: label -> {file, crop_px}."""
+        (size, bundle_files, sprite_files) — sprite_files: label -> {file, crop_px}."""
         from PIL import Image
         im = Image.open(BytesIO(map_bytes)).convert("RGB")
         width, height = im.size
@@ -35,57 +61,136 @@ def register(mcp, ctx):
                 cut = await engine.run_pipeline(buf.getvalue(), PipelineOptions(**_CUT_OPTS))
             except Exception:
                 cut = buf.getvalue()  # keep the raw crop rather than dropping the object
-            name = f"sprite_{obj['label']}.png"
+            name = f"sprite_{key}_{obj['label']}.png"
             bundle_files.append((name, cut))
             sprite_files[obj["label"]] = {"file": name, "crop_px": [top, left, bottom, right]}
         return (width, height), bundle_files, sprite_files
 
-    async def _build_world(map_bytes, *, project, name, hints, max_objects, detect_model,
-                           collision, preview, band_frac, grid_cols, subpath):
+    async def _process_map(map_bytes, key, *, hints, max_objects, detect_model,
+                           collision, band_frac, grid_cols):
+        """One map through the shared pipeline. Returns (objects, entry, bundle_files) —
+        entry is the world.json map entry, mutated later when links attach."""
         detected = await worldgen.detect_scene(
             ctx.http, cfg.gemini_api_keys, map_bytes, "image/png",
             hints=hints, max_objects=max_objects, model=detect_model)
         objects, spawn = detected["objects"], detected["player_spawn"]
-
-        (width, height), bundle_files, sprite_files = await _cut_sprites(map_bytes, objects)
-
+        (width, height), bundle_files, sprite_files = await _cut_sprites(map_bytes, objects, key)
         grid = None
         if collision:
             rows = max(8, round(grid_cols * height / max(1, width)))
             grid = worldgen.build_collision(objects, cols=grid_cols, rows=rows,
                                             band_frac=band_frac)
-        manifest = worldgen.build_manifest(name, "map.png", width, height,
-                                           objects, spawn, grid, sprite_files)
-        bundle_files.insert(0, ("map.png", map_bytes))
+        bundle_files.insert(0, (f"map_{key}.png", map_bytes))
+        entry = worldgen.build_map_entry(f"map_{key}.png", width, height, objects, spawn,
+                                         grid, sprite_files)
+        return objects, entry, bundle_files
+
+    def _relink(entry, objects):
+        """Re-run link attachment after objects gained 'link' fields (entries were built
+        before links existed for the main map)."""
+        by_label = {o["label"]: o for o in objects}
+        for eo in entry["objects"]:
+            src = by_label.get(eo["label"])
+            if src and "link" in src:
+                eo["link"] = src["link"]
+
+    async def _build_world(map_bytes, *, project, name, prompt, hints, max_objects,
+                           detect_model, collision, preview, band_frac, grid_cols,
+                           expand_enterables, upscale, aspect_ratio, subpath,
+                           progress=lambda msg: None):
+        notes = {}
+        if upscale:
+            progress("upscaling map")
+            map_bytes, notes["upscale_main"] = await _maybe_upscale(map_bytes)
+
+        progress("detecting objects")
+        main_objects, main_entry, bundle_files = await _process_map(
+            map_bytes, "main", hints=hints, max_objects=max_objects,
+            detect_model=detect_model, collision=collision,
+            band_frac=band_frac, grid_cols=grid_cols)
+
+        maps = {"main": main_entry}
+        doors = worldgen.pick_expandable(main_objects, expand_enterables)
+        used_keys = {"main"}
+        for door in doors:
+            key = worldgen.map_key_for(door["label"])
+            n = 2
+            while key in used_keys:
+                key = f"{worldgen.map_key_for(door['label'])}_{n}"
+                n += 1
+            used_keys.add(key)
+            progress(f"painting interior: {key}")
+            try:
+                interiors = await g.call_gemini_image(
+                    ctx.http, cfg.gemini_api_keys,
+                    worldgen.interior_prompt(door["label"], prompt),
+                    reference_images=[("image/png", map_bytes)],
+                    aspect_ratio=aspect_ratio)
+                interior_bytes = interiors[0]
+            except Exception as e:
+                notes[f"interior_{key}"] = f"skipped ({e})"
+                continue
+            if upscale:
+                interior_bytes, notes[f"upscale_{key}"] = await _maybe_upscale(interior_bytes)
+            progress(f"worldifying interior: {key}")
+            in_objects, in_entry, in_files = await _process_map(
+                interior_bytes, key, hints=worldgen.INTERIOR_DETECT_HINTS,
+                max_objects=max_objects, detect_model=detect_model, collision=collision,
+                band_frac=band_frac, grid_cols=grid_cols)
+            entry_spawn, exit_label = worldgen.interior_entry_exit(in_objects)
+            return_link = {"to": "main", "spawn": worldgen.door_return_spawn(door["box_2d"])}
+            if exit_label:
+                for eo in in_entry["objects"]:
+                    if eo["label"] == exit_label:
+                        eo["link"] = return_link
+            else:
+                exit_obj = worldgen.synthesize_exit()
+                exit_obj["link"] = return_link
+                in_entry["objects"].append(exit_obj)
+            in_entry["player_spawn"] = entry_spawn
+            door["link"] = {"to": key, "spawn": entry_spawn}
+            maps[key] = in_entry
+            bundle_files.extend(in_files)
+        _relink(main_entry, main_objects)
+
+        manifest = worldgen.build_world_manifest(name, maps, "main")
         bundle_files.append(("world.json", json.dumps(manifest, indent=2).encode()))
         if preview:
             bundle_files.append(("preview.html", worldgen.render_preview_html(manifest).encode()))
 
+        progress("saving bundle")
         sub = (subpath or "assets/forge").strip("/\\") + f"/worlds/{storage.safe_filename(name)}"
         saved = await storage.save_bundle(bundle_files, project=project, subpath=sub, cfg=cfg)
 
         by_cat = {}
-        for obj in objects:
+        for obj in main_objects:
             by_cat[obj["category"]] = by_cat.get(obj["category"], 0) + 1
         out = {
             "name": name,
-            "map_url": saved["files"].get("map.png"),
+            "maps": list(maps),
+            "main_objects": by_cat,
+            "sprites_cut": sum(1 for f, _ in bundle_files if f.startswith("sprite_")),
             "world_json_url": saved["files"].get("world.json"),
-            "objects": by_cat,
-            "sprites_cut": len(sprite_files),
-            "player_spawn": manifest["player_spawn"],
             "bundle_url": saved["base_url"],
         }
         if preview:
             out["preview_url"] = saved["files"].get("preview.html")
-        if grid:
-            out["collision"] = {"cols": grid["cols"], "rows": grid["rows"],
-                                "blocked_cells": len(grid["blocked"])}
+        interesting = {k: v for k, v in notes.items() if v and not v.startswith("esrgan")}
+        if interesting:
+            out["notes"] = interesting
         if "workspace_dir" in saved:
             out["workspace_dir"] = saved["workspace_dir"]
         if "workspace_write_error" in saved:
             out["workspace_write_error"] = saved["workspace_write_error"]
         return out
+
+    async def _run_world_job(job_id, map_bytes, kwargs):
+        try:
+            result = await _build_world(
+                map_bytes, progress=lambda msg: jobs.update(job_id, message=msg), **kwargs)
+            jobs.update(job_id, status="done", message="complete", results=[result])
+        except Exception as e:  # job boundary: everything becomes a readable failed status
+            jobs.update(job_id, status="failed", error=str(e))
 
     @mcp.tool()
     async def generate_world(prompt: str, project: str, name: str | None = None,
@@ -93,31 +198,41 @@ def register(mcp, ctx):
                              aspect_ratio: str = "16:9", style: str | None = None,
                              hints: str | None = None, max_objects: int = 48,
                              detect_model: str = worldgen.DETECT_MODEL,
+                             expand_enterables: int = 3, upscale: bool = True,
                              collision: bool = True, preview: bool = True,
                              band_frac: float = 0.30, grid_cols: int = 64,
                              subpath: str | None = None) -> dict:
-        """Generate a complete playable 2D game WORLD from one prompt — the whole scene is
-        painted as ONE image (perfect internal style consistency, baked lighting), then AI
-        object detection labels every prop, obstacles are cut out as transparent sprites
-        (so characters can walk BEHIND them), a walkability/collision grid is derived from
-        obstacle footprints, and everything is written as a bundle:
-        map.png + sprite_*.png + world.json + a PLAYABLE preview.html (open the returned
-        preview_url — WASD/drag to walk the world, G shows the collision grid).
+        """Generate a complete EXPLORABLE 2D game world from one prompt. The outdoor scene
+        is painted as ONE image (perfect internal style consistency, baked lighting), AI
+        detection labels every prop, obstacles become transparent cutout sprites (characters
+        walk BEHIND them), a collision grid is derived from obstacle footprints — and then
+        the world grows: up to `expand_enterables` detected doors each get a style-matched
+        INTERIOR map (painted with the exterior as the style reference), linked both ways.
+        The map is ESRGAN-upscaled 2x on a pool GPU when one is free (`upscale=false` to skip).
+
+        Output bundle: map_*.png + sprite_*.png + world.json + a PLAYABLE preview.html —
+        open the preview_url: follow camera, WASD/drag to walk, walk into doors to enter
+        buildings, G shows collision + door triggers, Z cycles zoom.
+
+        With expand_enterables > 0 (default 3) this runs as an ASYNC JOB — you get
+        {job_id} back immediately; poll job_status(job_id) until done (message shows the
+        current stage; a 3-interior world takes ~2-4 minutes). Pass expand_enterables=0
+        for a fast synchronous single-map world.
 
         Vague prompts work ("a spooky forest village"); the default style locks a
-        hand-painted 16-bit top-down RPG look (Stardew/Eastward lineage). Pass style="" for
-        no style wrapper, or your own style string. Pass image (https URL or
-        '<Project>/<path>') to skip generation and worldify existing art.
+        hand-painted 16-bit top-down RPG look (Stardew/Eastward lineage). style="" = no
+        style wrapper; custom style strings are used verbatim. Pass image (https URL or
+        '<Project>/<path>') to worldify existing art instead of generating.
 
-        world.json is self-describing: objects carry box_2d [ymin,xmin,ymax,xmax]
-        normalized 0-1000 (y-first), sprites carry crop_px for exact in-place redraw,
-        collision is a cols x rows grid of blocked cell indices. Categories: obstacle
-        (blocks + occludes), zone_blocked (water/cliffs), enterable (doors), decor.
-        hints steers detection ("the river is impassable; tag market stalls enterable").
+        world.json (format carbon-forge-world/2) is self-describing: maps: {key: {map,
+        width, height, player_spawn, objects, collision}}; objects carry box_2d
+        [ymin,xmin,ymax,xmax] normalized 0-1000 (y-first), cutouts carry crop_px for exact
+        in-place redraw, enterables carry link {to, spawn}. Categories: obstacle,
+        zone_blocked, enterable, decor. hints steers detection ("the river is impassable").
 
         model: imagen-4 | imagen-4-fast | imagen-4-ultra. aspect_ratio: 16:9, 4:3, 1:1...
         band_frac: how much of an obstacle's base blocks walking (0.30 = bottom 30%).
-        Cost: one Imagen image + one Gemini Flash detection (~a cent); cutouts are local."""
+        Cost: ~1 Imagen + 1 Gemini image edit per interior + 1 detection per map (cents)."""
         world_name = storage.safe_filename(name or prompt[:40] or "world")
         if image:
             src = await storage.resolve_input(image, cfg=cfg, kind="image")
@@ -133,10 +248,21 @@ def register(mcp, ctx):
             if not images:
                 raise g.GenerationError("Imagen returned no images (prompt may have been refused)")
             map_bytes = images[0]
-        return await _build_world(map_bytes, project=project, name=world_name, hints=hints,
-                                  max_objects=max_objects, detect_model=detect_model,
-                                  collision=collision, preview=preview, band_frac=band_frac,
-                                  grid_cols=grid_cols, subpath=subpath)
+
+        kwargs = dict(project=project, name=world_name, prompt=prompt, hints=hints,
+                      max_objects=max_objects, detect_model=detect_model,
+                      collision=collision, preview=preview, band_frac=band_frac,
+                      grid_cols=grid_cols, expand_enterables=max(0, int(expand_enterables)),
+                      upscale=upscale, aspect_ratio=aspect_ratio, subpath=subpath)
+        if kwargs["expand_enterables"] > 0:
+            job = jobs.create(kind="world", model=model, prompt=prompt[:200],
+                              project=project, subpath=subpath, filename=world_name)
+            asyncio.create_task(_run_world_job(job["id"], map_bytes, kwargs))
+            return {"job_id": job["id"], "status": "running",
+                    "note": ("map painted; interiors + worldification running in the "
+                             "background — poll job_status(job_id), the result lands in "
+                             "results[0] with preview_url")}
+        return await _build_world(map_bytes, **kwargs)
 
     @mcp.tool()
     async def segment_scene(image: str, project: str, hints: str | None = None,
@@ -151,8 +277,8 @@ def register(mcp, ctx):
         decor); objects in `categories` (default ['obstacle']) are alpha-cut from their
         crop so they redraw exactly in place (crop_px in the manifest). Writes a bundle:
         the source image + sprite_*.png + world.json manifest. hints steers detection.
-        For the full playable pipeline (collision grid + preview.html, optional
-        generation) use generate_world."""
+        For the full explorable pipeline (interiors, collision, playable preview) use
+        generate_world."""
         src = await storage.resolve_input(image, cfg=cfg, kind="image")
         scene_name = storage.safe_filename(name or "scene")
         cats = tuple(c for c in (categories or ["obstacle"]) if c in worldgen.CATEGORIES) or ("obstacle",)
@@ -160,10 +286,12 @@ def register(mcp, ctx):
             ctx.http, cfg.gemini_api_keys, src.data, src.mime or "image/png",
             hints=hints, max_objects=max_objects, model=detect_model)
         objects = detected["objects"]
-        (width, height), bundle_files, sprite_files = await _cut_sprites(src.data, objects, cats)
-        manifest = worldgen.build_manifest(scene_name, "map.png", width, height,
-                                           objects, detected["player_spawn"], None, sprite_files)
-        bundle_files.insert(0, ("map.png", src.data))
+        (width, height), bundle_files, sprite_files = await _cut_sprites(
+            src.data, objects, "main", cats)
+        entry = worldgen.build_map_entry("map_main.png", width, height, objects,
+                                         detected["player_spawn"], None, sprite_files)
+        manifest = worldgen.build_world_manifest(scene_name, {"main": entry})
+        bundle_files.insert(0, ("map_main.png", src.data))
         bundle_files.append(("world.json", json.dumps(manifest, indent=2).encode()))
         sub = (subpath or "assets/forge").strip("/\\") + f"/scenes/{scene_name}"
         saved = await storage.save_bundle(bundle_files, project=project, subpath=sub, cfg=cfg)

@@ -1,15 +1,20 @@
 """Game-world pipeline: one generated map image -> detected objects -> cutout
 sprites + collision grid + playable preview (the "capybara.build" workflow).
 
-The map is generated as ONE painting (perfect internal style consistency, baked
+Each map is painted as ONE image (perfect internal style consistency, baked
 lighting), then Gemini spatial understanding returns labeled box_2d detections
 ([ymin, xmin, ymax, xmax], normalized 0-1000 — Gemini's native convention, kept
 end-to-end), obstacle boxes are cut out as transparent sprites via the shared
 rembg engine, and walkability is derived from obstacle "footprint bands" (a
 character walks BEHIND a tree's canopy but collides with its trunk base).
 
-Pure helpers (parse/clamp/grid/manifest/preview) stay side-effect free for tests;
-only detect_scene talks to the network.
+Explorable worlds are MULTI-MAP (the classic RPG model): detected `enterable`
+doors can each expand into a style-matched interior map (Gemini image edit with
+the exterior as reference), linked both ways; the preview walks between them
+with a follow camera.
+
+Pure helpers (parse/clamp/grid/manifest/links/preview) stay side-effect free for
+tests; only detect_scene talks to the network.
 """
 import base64
 import json
@@ -39,6 +44,29 @@ def world_prompt(scene: str, style: str = DEFAULT_WORLD_STYLE) -> str:
         "richly detailed. No characters, no people, no animals, no text, no watermark, "
         "no UI. The scene fills the entire frame edge to edge."
     )
+
+
+def interior_prompt(label: str, scene: str, style: str = DEFAULT_WORLD_STYLE) -> str:
+    """Interior-map prompt for a Gemini image EDIT call that carries the exterior map
+    as a reference image — that reference is what locks palette and rendering style."""
+    pretty = label.replace("_", " ")
+    return (
+        f"Using the reference image's exact art style, palette, lighting and pixel "
+        f"density, paint a DIFFERENT image: the single-room INTERIOR of the {pretty} "
+        f"from that scene (the scene is {scene.strip()}). "
+        f"A {style} video game interior map, screenshot of a 2D game: one room seen "
+        "from above, floor filling most of the frame, furniture and props along the "
+        "walls, and the entrance DOOR on the BOTTOM edge of the room. "
+        "No characters, no people, no animals, no text, no watermark, no UI. "
+        "The room fills the entire frame edge to edge."
+    )
+
+
+INTERIOR_DETECT_HINTS = (
+    "This is a single INDOOR room. The walls and anything outside them are zone_blocked. "
+    "The entrance door on the bottom edge is enterable (label it exit_door). Furniture "
+    "and props inside the room are obstacles."
+)
 
 _DETECT_SCHEMA = {
     "type": "object",
@@ -73,6 +101,7 @@ Rules:
 - box_2d is [ymin, xmin, ymax, xmax], integers normalized to 0-1000 of the image.
 - Boxes must be TIGHT around each object, including its cast shadow for obstacles.
 - Give each object a short snake_case label, numbered when repeated (barrel_1, barrel_2).
+- For enterable doors, name the label after what they lead into (brewing_shed_door, tavern_door).
 - Prefer many individual objects over one merged box; never return a box covering most of the map except for zone_blocked regions that truly are that large.
 - Also return player_spawn as [y, x] (0-1000): a point on open, walkable ground away from obstacles.
 """
@@ -84,7 +113,7 @@ async def detect_scene(http, api_keys, image_bytes: bytes, mime: str,
     """Gemini spatial detection -> {"objects": [...], "player_spawn": [y, x] | None}."""
     prompt = _DETECT_PROMPT
     if hints:
-        prompt += f"\nExtra guidance from the user: {hints.strip()}\n"
+        prompt += f"\nExtra guidance: {hints.strip()}\n"
     prompt += f"\nReturn at most {max(4, min(int(max_objects), 100))} objects, largest/most important first."
     small = _detection_copy(image_bytes)
     url = f"{g.GEMINI_API}/models/{model}:generateContent"
@@ -211,12 +240,66 @@ def build_collision(objects, cols: int = 64, rows: int = 36, band_frac: float = 
     return {"cols": cols, "rows": rows, "blocked": sorted(blocked)}
 
 
-def build_manifest(name: str, map_file: str, width: int, height: int,
-                   objects: list, spawn, collision: dict | None,
-                   sprite_files: dict | None = None) -> dict:
-    """The self-describing world.json. sprite_files maps label ->
+# ---- multi-map linking ----
+
+def pick_expandable(objects, limit: int) -> list:
+    """The enterables worth turning into interiors: largest boxes first."""
+    doors = [o for o in objects if o["category"] == "enterable"]
+    doors.sort(key=lambda o: (o["box_2d"][2] - o["box_2d"][0]) * (o["box_2d"][3] - o["box_2d"][1]),
+               reverse=True)
+    return doors[: max(0, int(limit))]
+
+
+def map_key_for(label: str) -> str:
+    """brewing_shed_door -> brewing_shed; tavern_door_2 -> tavern_2."""
+    parts = [p for p in label.split("_") if p]
+    suffix = ""
+    if parts and parts[-1].isdigit():
+        suffix = "_" + parts.pop()
+    if parts and parts[-1] in ("door", "gate", "entrance", "doorway", "stairs", "mouth"):
+        parts.pop()
+    return ("_".join(parts) or "interior") + suffix
+
+
+def door_return_spawn(door_box) -> list:
+    """Where the player reappears on the PARENT map after exiting an interior:
+    just below the door's box, centered."""
+    y1, x1, y2, x2 = door_box
+    return [min(985, y2 + 30), (x1 + x2) // 2]
+
+
+def interior_entry_exit(objects) -> tuple:
+    """(entry_spawn [y,x], exit_label) for an interior map. Prefers a detected
+    enterable near the bottom-center (the entrance door the prompt asked for);
+    otherwise callers should synthesize an exit strip with synthesize_exit()."""
+    best = None
+    for obj in objects:
+        if obj["category"] != "enterable":
+            continue
+        y1, x1, y2, x2 = obj["box_2d"]
+        cx = (x1 + x2) / 2
+        if y2 >= 650 and 200 <= cx <= 800:
+            if best is None or y2 > best["box_2d"][2]:
+                best = obj
+    if best:
+        y1, x1, y2, x2 = best["box_2d"]
+        return [max(40, y1 - 45), (x1 + x2) // 2], best["label"]
+    return [880, 500], None
+
+
+def synthesize_exit() -> dict:
+    """Fallback exit strip at the bottom-center of an interior with no detected door."""
+    return {"label": "exit", "category": "enterable", "box_2d": [950, 360, 1000, 640]}
+
+
+# ---- manifest (format v2: multi-map) ----
+
+def build_map_entry(map_file: str, width: int, height: int, objects: list, spawn,
+                    collision: dict | None, sprite_files: dict | None = None) -> dict:
+    """One map's entry for world.json. sprite_files maps label ->
     {"file": bundle filename, "crop_px": [top, left, bottom, right]} — crop_px is the
-    exact padded pixel box the sprite was cut from, so renderers can redraw it in place."""
+    exact padded pixel box the sprite was cut from, so renderers redraw it in place.
+    Enterable objects may carry "link": {"to": <map key>, "spawn": [y, x]}."""
     out_objects = []
     for obj in objects:
         entry = {"label": obj["label"], "category": obj["category"], "box_2d": obj["box_2d"]}
@@ -224,29 +307,41 @@ def build_manifest(name: str, map_file: str, width: int, height: int,
         if cut:
             entry["sprite"] = cut["file"]
             entry["crop_px"] = cut["crop_px"]
+        if "link" in obj:
+            entry["link"] = obj["link"]
         out_objects.append(entry)
-    manifest = {
-        "format": "carbon-forge-world/1",
-        "name": name,
+    entry = {
         "map": map_file,
         "width": width,
         "height": height,
-        "coordinate_space": {
-            "units": "normalized 0-1000",
-            "box_2d": "[ymin, xmin, ymax, xmax] (y before x — Gemini spatial convention)",
-        },
         "player_spawn": spawn or [500, 500],
         "objects": out_objects,
     }
     if collision:
-        manifest["collision"] = collision
-    return manifest
+        entry["collision"] = collision
+    return entry
+
+
+def build_world_manifest(name: str, maps: dict, start: str = "main") -> dict:
+    """world.json (format 2): {maps: {key: map_entry}, start}. Single-map worlds are
+    just a v2 manifest with one entry."""
+    return {
+        "format": "carbon-forge-world/2",
+        "name": name,
+        "coordinate_space": {
+            "units": "normalized 0-1000 per map",
+            "box_2d": "[ymin, xmin, ymax, xmax] (y before x — Gemini spatial convention)",
+        },
+        "start": start if start in maps else next(iter(maps)),
+        "maps": maps,
+    }
 
 
 def render_preview_html(manifest: dict) -> str:
-    """Self-contained playable preview: map + depth-sorted obstacle sprites + collision
-    walker. References bundle siblings by relative filename, so it works from the results
-    cache URL and from the workspace folder alike."""
+    """Self-contained playable preview: follow camera, depth-sorted obstacle sprites,
+    collision walker, and map transitions through linked enterables. References bundle
+    siblings by relative filename, so it works from the results cache URL and from the
+    workspace folder alike."""
     return _PREVIEW_TEMPLATE.replace("__WORLD_JSON__", json.dumps(manifest))
 
 
@@ -255,71 +350,137 @@ _PREVIEW_TEMPLATE = """<!doctype html>
 <title>World preview</title>
 <style>
   html,body{margin:0;height:100%;background:#0e0c14;overflow:hidden}
-  canvas{display:block;width:100vw;height:100vh;object-fit:contain;image-rendering:auto}
+  canvas{display:block;width:100vw;height:100vh;touch-action:none}
   #hud{position:fixed;left:10px;bottom:8px;color:#cbc6de;font:12px/1.4 monospace;opacity:.8;
        user-select:none;pointer-events:none}
+  #mapname{position:fixed;top:12px;left:50%;transform:translateX(-50%);color:#efe9ff;
+       font:bold 14px/1 monospace;letter-spacing:2px;text-transform:uppercase;opacity:0;
+       transition:opacity .4s;text-shadow:0 2px 6px #000;pointer-events:none}
+  #fade{position:fixed;inset:0;background:#000;opacity:0;transition:opacity .28s;pointer-events:none}
 </style></head><body>
-<canvas id="c"></canvas><div id="hud">WASD / arrows / drag to walk &middot; G toggles collision grid</div>
+<canvas id="c"></canvas><div id="mapname"></div><div id="fade"></div>
+<div id="hud">WASD / arrows / drag to walk &middot; walk into doors &middot; G collision grid &middot; Z zoom</div>
 <script>
 const WORLD = __WORLD_JSON__;
-const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-const N = 1000, col = WORLD.collision || null;
-let showGrid = false, imgs = {}, mapImg = new Image();
-mapImg.src = WORLD.map;
-const obstacles = WORLD.objects.filter(o => o.sprite);
-for (const o of obstacles) { const im = new Image(); im.src = o.sprite; imgs[o.label] = im; }
-const player = { y: WORLD.player_spawn[0], x: WORLD.player_spawn[1], r: 9, speed: 220 };
+const N = 1000, cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const fadeEl = document.getElementById('fade'), nameEl = document.getElementById('mapname');
+const ZOOMS = [2.2, 1.5, 1.0];  // viewport shows 1/zoom of the map height
+let zoomIdx = 0, showGrid = false, transitioning = false, linkCooldown = 0;
+const state = { key: WORLD.start, map: WORLD.maps[WORLD.start] };
+const player = { y: state.map.player_spawn[0], x: state.map.player_spawn[1], speed: 230 };
+const assets = {};  // per map key: {bg: Image, sprites: {label: Image}, blocked: Set}
+function loadMap(key) {
+  if (assets[key]) return assets[key];
+  const m = WORLD.maps[key], bg = new Image(); bg.src = m.map;
+  const sprites = {};
+  for (const o of m.objects) if (o.sprite) { const im = new Image(); im.src = o.sprite; sprites[o.label] = im; }
+  return assets[key] = { bg, sprites, blocked: new Set(m.collision ? m.collision.blocked : []) };
+}
+loadMap(state.key);
+for (const key of Object.keys(WORLD.maps)) loadMap(key);  // prefetch the rest
+function announce(key) {
+  nameEl.textContent = key.replace(/_/g, ' ');
+  nameEl.style.opacity = 1; clearTimeout(announce._t);
+  announce._t = setTimeout(() => nameEl.style.opacity = 0, 1600);
+}
+announce(state.key);
 const keys = {}, drag = { on:false, x:0, y:0, dx:0, dy:0 };
-addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; if (e.key.toLowerCase() === 'g') showGrid = !showGrid; });
+addEventListener('keydown', e => { const k = e.key.toLowerCase(); keys[k] = true;
+  if (k === 'g') showGrid = !showGrid; if (k === 'z') zoomIdx = (zoomIdx + 1) % ZOOMS.length; });
 addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
 cv.addEventListener('pointerdown', e => { drag.on = true; drag.x = e.clientX; drag.y = e.clientY; });
 addEventListener('pointermove', e => { if (drag.on) { drag.dx = e.clientX - drag.x; drag.dy = e.clientY - drag.y; } });
 addEventListener('pointerup', () => { drag.on = false; drag.dx = drag.dy = 0; });
 function blocked(x, y) {
-  if (x < 8 || x > N - 8 || y < 8 || y > N - 8) return true;
-  if (!col) return false;
+  if (x < 8 || x > N - 8 || y < 4 || y > N - 4) return true;
+  const col = state.map.collision; if (!col) return false;
   const c = Math.min(col.cols - 1, Math.max(0, Math.floor(x * col.cols / N)));
   const r = Math.min(col.rows - 1, Math.max(0, Math.floor(y * col.rows / N)));
-  return blockedSet.has(r * col.cols + c);
+  return assets[state.key].blocked.has(r * col.cols + c);
 }
-const blockedSet = new Set(col ? col.blocked : []);
+function linkAt(x, y) {
+  for (const o of state.map.objects) {
+    if (!o.link) continue;
+    const [y1, x1, y2, x2] = o.box_2d, m = 12;  // slightly forgiving trigger
+    if (x >= x1 - m && x <= x2 + m && y >= y1 - m && y <= y2 + m) return o.link;
+  }
+  return null;
+}
+function travel(link) {
+  transitioning = true; fadeEl.style.opacity = 1;
+  setTimeout(() => {
+    state.key = link.to; state.map = WORLD.maps[link.to];
+    player.y = link.spawn[0]; player.x = link.spawn[1];
+    linkCooldown = 1.0; announce(state.key);
+    fadeEl.style.opacity = 0; transitioning = false;
+  }, 300);
+}
 let last = performance.now();
 function tick(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
-  let mx = (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0);
-  let my = (keys['s'] || keys['arrowdown'] ? 1 : 0) - (keys['w'] || keys['arrowup'] ? 1 : 0);
-  if (drag.on && (Math.abs(drag.dx) > 8 || Math.abs(drag.dy) > 8)) {
-    const m = Math.hypot(drag.dx, drag.dy); mx = drag.dx / m; my = drag.dy / m;
+  if (!transitioning) {
+    let mx = (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0);
+    let my = (keys['s'] || keys['arrowdown'] ? 1 : 0) - (keys['w'] || keys['arrowup'] ? 1 : 0);
+    if (drag.on && (Math.abs(drag.dx) > 8 || Math.abs(drag.dy) > 8)) {
+      const m = Math.hypot(drag.dx, drag.dy); mx = drag.dx / m; my = drag.dy / m;
+    }
+    const len = Math.hypot(mx, my) || 1;
+    const nx = player.x + (mx / len) * player.speed * dt;
+    const ny = player.y + (my / len) * player.speed * dt;
+    if (!blocked(nx, player.y)) player.x = nx;
+    if (!blocked(player.x, ny)) player.y = ny;
+    linkCooldown = Math.max(0, linkCooldown - dt);
+    if (linkCooldown === 0 && (mx || my)) {
+      const link = linkAt(player.x, player.y);
+      if (link) travel(link);
+    }
   }
-  const len = Math.hypot(mx, my) || 1;
-  const nx = player.x + (mx / len) * player.speed * dt;
-  const ny = player.y + (my / len) * player.speed * dt;
-  if (!blocked(nx, player.y)) player.x = nx;
-  if (!blocked(player.x, ny)) player.y = ny;
   draw(); requestAnimationFrame(tick);
 }
+let camX = null, camY = null;
 function draw() {
-  const W = mapImg.naturalWidth || 1600, H = mapImg.naturalHeight || 900;
-  if (cv.width !== W) { cv.width = W; cv.height = H; }
-  ctx.clearRect(0, 0, W, H);
-  if (mapImg.complete) ctx.drawImage(mapImg, 0, 0, W, H);
-  const px = player.x / N * W, py = player.y / N * H;
-  const layers = obstacles.map(o => ({ o, foot: o.box_2d[2] })).concat([{ player: true, foot: player.y }]);
-  layers.sort((a, b) => a.foot - b.foot);
+  const a = assets[state.key], m = state.map;
+  const W = innerWidth * devicePixelRatio, H = innerHeight * devicePixelRatio;
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  const mw = m.width, mh = m.height;
+  const zoom = ZOOMS[zoomIdx];
+  // scale so the viewport shows (map height / zoom), never upscaling past fit-width
+  let scale = H / (mh / zoom);
+  const viewW = W / scale, viewH = H / scale;
+  const px = player.x / N * mw, py = player.y / N * mh;
+  let tx = px - viewW / 2, ty = py - viewH / 2;
+  tx = Math.max(0, Math.min(Math.max(0, mw - viewW), tx));
+  ty = Math.max(0, Math.min(Math.max(0, mh - viewH), ty));
+  if (camX === null) { camX = tx; camY = ty; }
+  camX += (tx - camX) * 0.12; camY += (ty - camY) * 0.12;
+  ctx.setTransform(scale, 0, 0, scale, -camX * scale, -camY * scale);
+  ctx.clearRect(camX, camY, viewW, viewH);
+  ctx.imageSmoothingEnabled = true;
+  if (a.bg.complete) ctx.drawImage(a.bg, 0, 0, mw, mh);
+  else { ctx.fillStyle = '#1a1626'; ctx.fillRect(0, 0, mw, mh); }
+  const layers = m.objects.filter(o => o.sprite).map(o => ({ o, foot: o.box_2d[2] }))
+    .concat([{ player: true, foot: player.y }]);
+  layers.sort((x, y) => x.foot - y.foot);
   for (const l of layers) {
-    if (l.player) { drawPlayer(px, py, H); continue; }
-    const im = imgs[l.o.label]; if (!im || !im.complete || !im.naturalWidth) continue;
-    const [y1, x1, y2, x2] = l.o.crop_px || [];
-    if (l.o.crop_px) ctx.drawImage(im, x1, y1, x2 - x1, y2 - y1);
+    if (l.player) { drawPlayer(px, py, mh); continue; }
+    const im = a.sprites[l.o.label];
+    if (!im || !im.complete || !im.naturalWidth || !l.o.crop_px) continue;
+    const [t, lft, b, r] = l.o.crop_px;
+    ctx.drawImage(im, lft, t, r - lft, b - t);
   }
-  if (showGrid && col) {
+  if (showGrid && m.collision) {
+    const col = m.collision, cw = mw / col.cols, ch = mh / col.rows;
     ctx.fillStyle = 'rgba(255,60,60,0.28)';
-    const cw = W / col.cols, ch = H / col.rows;
-    for (const idx of blockedSet) ctx.fillRect((idx % col.cols) * cw, Math.floor(idx / col.cols) * ch, cw, ch);
+    for (const idx of a.blocked) ctx.fillRect((idx % col.cols) * cw, Math.floor(idx / col.cols) * ch, cw, ch);
+    ctx.fillStyle = 'rgba(80,160,255,0.35)';
+    for (const o of m.objects) if (o.link) {
+      const [y1, x1, y2, x2] = o.box_2d;
+      ctx.fillRect(x1 / N * mw, y1 / N * mh, (x2 - x1) / N * mw, (y2 - y1) / N * mh);
+    }
   }
 }
-function drawPlayer(px, py, H) {
-  const s = H / 22;
+function drawPlayer(px, py, mh) {
+  const s = mh / 26;
   ctx.fillStyle = 'rgba(0,0,0,0.30)';
   ctx.beginPath(); ctx.ellipse(px, py, s * 0.55, s * 0.2, 0, 0, 7); ctx.fill();
   ctx.fillStyle = '#3b7dd8'; ctx.strokeStyle = '#16233c'; ctx.lineWidth = 2;
