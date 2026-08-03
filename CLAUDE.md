@@ -21,11 +21,14 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
   storage.py      # input resolution (URL | '<Project>/<path>'), dual-write results, URL minting, janitor
   generation.py   # Imagen 4 / Gemini image / Veo + ElevenLabs TTS + local ComfyUI (SDXL/Flux/Wan/ESRGAN)
   jobs.py         # persistent Veo job registry (/results/jobs.json), restart resume
+  worldgen.py     # game-world pipeline: Gemini spatial detection (box_2d [y1,x1,y2,x2]
+                  #   0-1000), footprint-band collision grids, world.json manifest,
+                  #   playable preview.html template (the capybara.build workflow)
   video.py        # ffmpeg wrappers: video trim/frames/convert + audio convert/trim + ffprobe
   imaging.py      # Pillow format conversion (image_convert — plain convert/resize, no AI)
   assets3d.py     # GLB helpers: Draco compression (gltf-transform CLI, node in image) + stats
   engine.py       # async bridge to backend.processing (CPU semaphore, model-load lock)
-  tools/          # MCP tool definitions: proc, gen, vid, audio, extract, util, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, saved characters, audio TTS, batch/montage, generate_clip pipeline)
+  tools/          # MCP tool definitions: proc, gen, vid, audio, extract, util, world, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, saved characters, audio TTS, batch/montage, generate_clip pipeline)
                   #   audio.py = generate_speech / list_voices. TWO TTS providers:
                   #   ElevenLabs (cloud) + Chatterbox (local, isolated GPU container, see below)
                   #   util.py = quick conversions: audio_convert / audio_trim / image_convert /
@@ -96,6 +99,28 @@ API — for img2img, upscalers, transcription, …). `model` accepts `owner/name
 `owner/name:version` (pinned). Needs `REPLICATE_API_TOKEN` in the service `.env` (org account
 `carbonnode`); billed per run — image models are typically sub-cent, video models $0.10+.
 Source: `forge_mcp/replicate_api.py` (HTTP client, no SDK) + `forge_mcp/tools/replicate.py`.
+
+## Game worlds (two tools, `forge_mcp/tools/world.py` + `worldgen.py`)
+
+The capybara.build workflow (documented in Potion `research/capybara-build/`): paint the
+WHOLE scene as one image (perfect internal consistency, baked lighting), then make it
+playable by cutting it apart.
+
+- `generate_world(prompt, project, …)` — Imagen paints the map (default style wrapper =
+  hand-painted 16-bit top-down RPG; `style=""` disables, `image=` skips generation) →
+  Gemini Flash structured detection labels objects (`obstacle` / `zone_blocked` /
+  `enterable` / `decor`, box_2d `[ymin,xmin,ymax,xmax]` normalized 0-1000, y-first — kept
+  end-to-end) → obstacle crops are alpha-cut IN PLACE by the shared rembg engine
+  (`auto_trim=False`; `crop_px` in the manifest redraws them exactly, so mask-edge quality
+  only affects occlusion silhouettes) → collision grid from obstacle FOOTPRINT BANDS
+  (bottom `band_frac`; characters walk behind canopies, collide at the base;
+  `zone_blocked` blocks fully) → bundle: `map.png` + `sprite_*.png` + `world.json` +
+  playable `preview.html` (WASD/drag walker, G = collision grid).
+- `segment_scene(image, project, …)` — detection + in-place cutouts only, for any art.
+- Bundles use `storage.save_bundle` — ONE cache id for sibling files (preview.html
+  relative refs work at the URL and in the workspace copy, which skips unique-suffixing).
+  The `/files/{id}/{name}` route is flat: bundle filenames must not contain `/`.
+- Costs ~one Imagen call + one Gemini Flash detection; cutouts/collision are local CPU.
 
 ## Supporting infrastructure (touch points outside this repo)
 

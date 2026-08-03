@@ -219,6 +219,42 @@ async def save_result(data: bytes, *, project, subpath, filename, ext, cfg: Conf
     return result
 
 
+async def save_bundle(files: list, *, project, subpath, cfg: Config) -> dict:
+    """Write a SET of related files under ONE results-cache id (so an index/preview.html can
+    reference its siblings by relative filename) + the workspace (best effort, exact names —
+    no unique-suffixing, so relative references hold there too). files: [(name, bytes), ...],
+    flat names only (the /files route serves one level). Returns {base_url, files: {name: url},
+    workspace_dir?}."""
+    file_id = secrets.token_urlsafe(18)
+    cache_dir = os.path.join(cfg.results_root, "files", file_id)
+    await asyncio.to_thread(_makedirs, cache_dir)
+    out = {"base_url": f"{cfg.public_url}/files/{file_id}", "files": {}, "bytes": 0}
+    clean = []
+    for name, data in files:
+        name = safe_filename(name)
+        clean.append((name, data))
+        await asyncio.to_thread(_write_file, os.path.join(cache_dir, name), data)
+        out["files"][name] = f"{cfg.public_url}/files/{file_id}/{name}"
+        out["bytes"] += len(data)
+
+    if project:
+        sub = (subpath or "assets/forge").strip("/\\")
+        try:
+            validate_project(project, cfg=cfg)
+            rel_dir = "/".join([project] + sub.replace("\\", "/").split("/"))
+            target_dir = _workspace_abs(rel_dir, cfg)
+            await asyncio.to_thread(_makedirs, target_dir)
+            for name, data in clean:
+                await asyncio.to_thread(_write_file, os.path.join(target_dir, name), data)
+            rel_to_root = os.path.relpath(target_dir, cfg.workspace_root).replace("/", "\\")
+            out["workspace_dir"] = cfg.workspace_display_root.rstrip("\\") + "\\" + rel_to_root
+        except (StorageError, OSError) as e:
+            out["workspace_write_error"] = (
+                f"Bundle NOT written to the workspace ({e}). It is still available at base_url."
+            )
+    return out
+
+
 def prune_cache_once(cfg: Config):
     """Delete /results/files/<id> dirs older than the TTL."""
     files_root = os.path.join(cfg.results_root, "files")
