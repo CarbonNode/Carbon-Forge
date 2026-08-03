@@ -245,7 +245,17 @@ def build_collision(objects, cols: int = 64, rows: int = 36, band_frac: float = 
         if obj["category"] != "enterable":
             continue
         y1, x1, y2, x2 = obj["box_2d"]
-        blocked.difference_update(cells(y1, x1, min(1000, y2 + 30), x2))
+        # Carve all the way through the HOST obstacle's base (a door sits above its
+        # building's wall base, so a fixed apron leaves a blocked strip below it —
+        # observed live: the player stopped 50 units short of the tavern door).
+        carve_bottom = y2 + 30
+        for host in objects:
+            if host["category"] not in ("obstacle", "zone_blocked"):
+                continue
+            hy1, hx1, hy2, hx2 = host["box_2d"]
+            if hx1 < x2 and hx2 > x1 and hy1 < y2 and hy2 > y1:  # overlaps the door
+                carve_bottom = max(carve_bottom, hy2 + 15)
+        blocked.difference_update(cells(y1, x1, min(1000, carve_bottom), x2))
     return {"cols": cols, "rows": rows, "blocked": sorted(blocked)}
 
 

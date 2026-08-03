@@ -91,6 +91,21 @@ def test_collision_enterable_carves_door_through_obstacle():
     assert 0 in blocked_cols_bottom and 9 in blocked_cols_bottom
 
 
+def test_collision_door_carves_through_host_building_base():
+    objects = [
+        # building occupying the top 70% of the map; footprint band = y 490-700
+        {"label": "tavern", "category": "obstacle", "box_2d": [0, 0, 700, 1000]},
+        # door whose own box ends ABOVE the building's base
+        {"label": "tavern_door", "category": "enterable", "box_2d": [400, 400, 500, 600]},
+    ]
+    grid = worldgen.build_collision(objects, cols=10, rows=10, band_frac=0.30)
+    # door columns are open through the whole band (rows 4-6); flanks stay blocked
+    for row in (5, 6):
+        row_cols = {i % 10 for i in grid["blocked"] if i // 10 == row}
+        assert 4 not in row_cols and 5 not in row_cols
+        assert 0 in row_cols and 9 in row_cols
+
+
 def test_collision_indices_in_range():
     objects = [{"label": "wall", "category": "zone_blocked", "box_2d": [990, 990, 1000, 1000]}]
     grid = worldgen.build_collision(objects, cols=64, rows=36)
