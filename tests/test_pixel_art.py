@@ -282,6 +282,30 @@ def test_refine_split_sprite_shape():
     assert report["colors_after"] <= 4
 
 
+def test_refine_rejects_flat_vector_art():
+    # flat non-gridded art must NOT be resampled onto a phantom grid — the
+    # real-world failure was a Gemini potion icon mushed into a 3x3 blob
+    from PIL import ImageDraw
+    img = Image.new("RGBA", (460, 460), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle([170, 60, 290, 140], 30, fill=(220, 220, 225, 255))
+    d.ellipse([120, 140, 340, 420], fill=(240, 40, 70, 255))
+    d.ellipse([150, 180, 260, 300], fill=(250, 90, 110, 255))
+    d.rectangle([200, 40, 260, 80], fill=(140, 80, 40, 255))
+    out_bytes, report = pa.refine_pixel_art(to_png(np.array(img)), trim=False)
+    assert not report["grid"]["detected"]
+    out = Image.open(io.BytesIO(out_bytes))
+    assert out.size == (460, 460)  # preserved 1:1
+
+
+def test_refine_reconstruction_error_reported_on_accept():
+    logical = make_logical(seed=18)
+    big = upscale(logical, 8, blur=0.8)
+    _, report = pa.refine_pixel_art(to_png(big), max_colors=8)
+    assert report["grid"]["detected"]
+    assert report["grid"]["reconstruction_error"] <= pa.RECON_MAX_ERROR
+
+
 def test_refine_unknown_palette_raises():
     logical = make_logical(seed=14, w=8, h=8)
     with pytest.raises(ValueError, match="Unknown palette"):

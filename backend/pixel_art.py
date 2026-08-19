@@ -180,6 +180,11 @@ def parse_hex_color(s):
 
 MIN_GRID_EVIDENCE = 1.1        # BOUNDARY_CONTRAST_LIMITS.minEvidence
 HARMONIC_EVIDENCE_RATIO = 0.85  # keep the finest size within 85% of the peak
+# Auto-grid acceptance: mean premultiplied-RGB + alpha reconstruction error
+# (0..255-ish scale) above which a detected grid is rejected as not-a-pixel-grid.
+# Calibration: sharp upscales ~0, blur1.2+noise ~17, blur1.5 sprite ~13,
+# flat vector art (false positive) ~47.
+RECON_MAX_ERROR = 24.0
 
 
 def _gradient_profile(rgba, axis):
@@ -206,7 +211,9 @@ def _detect_axis(profile, length, max_cells):
         return None
     overall = total_g / total_w
     min_cell = max(2, int(np.ceil(length / max(2, max_cells))))
-    max_cell = min(MAX_CELL_PX, length // 3)  # need >= 3 cells of evidence
+    # need >= 6 cells of periodic evidence — pixel art has many cells per axis;
+    # a 3-4 "cell" fit is content structure, not a pixel grid
+    max_cell = min(MAX_CELL_PX, length // 6)
     if max_cell < min_cell:
         return None
 
@@ -279,6 +286,19 @@ def detect_grid(rgba, max_cells_w=AUTO_MAX_CELLS, max_cells_h=AUTO_MAX_CELLS):
         "score": round((est_x[2] + est_y[2]) / 2, 3),
         "detected": True,
     }
+
+
+def _reconstruction_error(rgba, grid, small):
+    """How badly the sampled grid reproduces the source: nearest-upscale the
+    logical image back and compare (premultiplied RGB + alpha, 0..255 scale)."""
+    up = np.repeat(np.repeat(small, grid["cell_h"], 0), grid["cell_w"], 1)
+    oy, ox = grid["offset_y"], grid["offset_x"]
+    src = rgba[oy:oy + up.shape[0], ox:ox + up.shape[1]].astype(np.float64)
+    up = up[:src.shape[0], :src.shape[1]].astype(np.float64)
+    pm_src = src[..., :3] * (src[..., 3:] / 255.0)
+    pm_up = up[..., :3] * (up[..., 3:] / 255.0)
+    err = np.abs(pm_src - pm_up).mean(-1) + np.abs(src[..., 3] - up[..., 3])
+    return float(err.mean())
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +672,20 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
 
     small = sample_cells(rgba, g, mode=sampling) \
         if (g["cell_w"] > 1 or g["cell_h"] > 1) else rgba.copy()
+
+    # Auto-grid acceptance gate: if resampling on the detected grid can't
+    # reproduce the source, there was no true pixel grid (flat/vector art,
+    # photos) — refining would destroy the artwork, so keep it 1:1.
+    if report["grid"]["mode"] == "auto" and (g["cell_w"] > 1 or g["cell_h"] > 1):
+        recon = _reconstruction_error(rgba, g, small)
+        report["grid"]["reconstruction_error"] = round(recon, 2)
+        if recon > RECON_MAX_ERROR:
+            report["grid"]["rejected"] = (
+                "detected grid could not reproduce the source "
+                f"(error {recon:.1f} > {RECON_MAX_ERROR:g}) — no true pixel "
+                "grid; kept 1:1. Pass cell_size to force a grid.")
+            report["grid"]["detected"] = False
+            small = rgba.copy()
 
     colors_before, _, _ = _unique_weighted_colors(small)
     report["colors_before"] = int(colors_before.shape[0])
