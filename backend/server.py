@@ -5,6 +5,7 @@ import base64
 import traceback
 from flask import Flask, request, Response, jsonify
 
+import pixel_art
 import processing
 from processing import (
     PipelineOptions, run_pipeline, run_split_pipeline, parse_colors,
@@ -121,6 +122,23 @@ def split_sprites_endpoint():
     sprites = run_split_pipeline(data, opts, min_area)
     encoded = [base64.b64encode(s).decode("ascii") for s in sprites]
     return jsonify({"count": len(encoded), "sprites": encoded})
+
+
+@app.post("/pixel-refine")
+def pixel_refine_endpoint():
+    """Refine AI 'fake' pixel art into true low-res pixels (pixel_art engine).
+    Options ride in the X-Refine-Options header as JSON (same keyword names as
+    pixel_art.refine_pixel_art); the analysis report returns in X-Refine-Report."""
+    data = request.get_data()
+    if not data:
+        return {"error": "No image data"}, 400
+    opts = _safe_json(request.headers.get("X-Refine-Options", "{}"))
+    if not isinstance(opts, dict):
+        opts = {}
+    out, report = pixel_art.refine_pixel_art(data, **opts)
+    resp = Response(out, mimetype="image/png")
+    resp.headers["X-Refine-Report"] = json.dumps(report)
+    return resp
 
 
 @app.post("/split-only")

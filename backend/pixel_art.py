@@ -616,13 +616,15 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
                      bg_tolerance=24, max_colors=0, palette=None,
                      dither="none", dither_strength=1.0,
                      outline="none", outline_color="#000000",
-                     trim=True, scale=1):
+                     trim=True, scale=1, target_px=0):
     """Full PixelRefiner pipeline. Returns (png_bytes, report_dict).
 
     grid: 'auto' (detect), 'off' (keep resolution), or pass cell_size > 0.
     sampling: 'medoid' | 'mean' | 'hard'.
     palette: a RETRO_PALETTES key or a list of '#rrggbb' strings; max_colors
     (k-means) applies when no palette is given.
+    target_px: when > 0 and scale is 1, pick the integer export scale that
+    brings the sprite's longest side closest to (without exceeding) target_px.
     """
     img = Image.open(io.BytesIO(data)).convert("RGBA")
     rgba = np.array(img, dtype=np.uint8)
@@ -693,6 +695,9 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
     report["output_size"] = [int(small.shape[1]), int(small.shape[0])]
 
     scale = max(1, min(32, int(scale)))
+    if scale == 1 and target_px and int(target_px) > 0:
+        longest = max(small.shape[0], small.shape[1])
+        scale = max(1, min(32, int(target_px) // max(1, longest)))
     if scale > 1:
         small = scale_nearest(small, scale)
         report["export_scale"] = scale

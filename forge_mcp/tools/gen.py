@@ -16,14 +16,25 @@ ICON_TEMPLATE = (
 )
 
 
-def _square_pad(data: bytes, size: int = 512, pad_frac: float = 0.12) -> bytes:
-    """Center a (already cut-out) image on a transparent square canvas with padding, sized to `size`."""
+def _square_pad(data: bytes, size: int = 512, pad_frac: float = 0.12,
+                pixel: bool = False) -> bytes:
+    """Center a (already cut-out) image on a transparent square canvas with padding,
+    sized to `size`. pixel=True keeps a crisp pixel grid: integer nearest-neighbor
+    scale only (nearest fractional downscale if the sprite doesn't fit)."""
     from PIL import Image
     im = Image.open(BytesIO(data)).convert("RGBA")
     inner = max(1, int(size * (1 - 2 * pad_frac)))
     w, h = im.size
-    scale = inner / max(w, h)
-    im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+    if pixel:
+        scale = inner // max(w, h)
+        if scale >= 1:
+            im = im.resize((w * scale, h * scale), Image.NEAREST)
+        else:
+            frac = inner / max(w, h)
+            im = im.resize((max(1, int(w * frac)), max(1, int(h * frac))), Image.NEAREST)
+    else:
+        scale = inner / max(w, h)
+        im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
     canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     canvas.paste(im, ((size - im.width) // 2, (size - im.height) // 2), im)
     buf = BytesIO()
@@ -158,7 +169,11 @@ def register(mcp, ctx):
                                   background: str | None = None, isolate: bool | None = None,
                                   pad_to_square: bool | None = None,
                                   snap_to_gutters: bool = True, inset: int | None = None,
-                                  cell_size: int = 512, subpath: str | None = None,
+                                  cell_size: int = 512,
+                                  pixel_refine: bool = False,
+                                  refine_max_colors: int = 0,
+                                  refine_palette: str | None = None,
+                                  subpath: str | None = None,
                                   filename: str | None = None) -> dict:
         """Generate a BATCH of distinct images in ONE model call: renders a sheet laid out
         as a grid, then cuts it into separate image files — the cheap, fast way to make
@@ -193,7 +208,14 @@ def register(mcp, ctx):
         near-square grid AND a sheet aspect matching it (cells stay square, the model
         complies far more often). Returns one image per subject IN ORDER (each with
         .subject, .isolated), plus grid_url (raw sheet), engine, grid{cols,rows,mode,
-        mismatch,snapped_lines}, warnings, cost_note."""
+        mismatch,snapped_lines}, warnings, cost_note.
+
+        pixel_refine=true (for PIXEL-ART sheets — sprites/icons prompted in 8/16-bit
+        style): each cut cell is run through the pixel-art refiner instead of the
+        LANCZOS enlarge — its logical pixel grid is detected and resampled to true
+        low-res pixels, then integer-upscaled toward cell_size. refine_max_colors
+        (k-means) / refine_palette (retro palette name, e.g. 'pico8') tune it; each
+        image carries a 'refine' report (detected cell size, confidence, colors)."""
         _require_key()
         import io
         from PIL import Image
@@ -209,6 +231,11 @@ def register(mcp, ctx):
         if model not in GRID_GEMINI_NAMES and model not in GRID_IMAGEN_MODELS:
             raise g.GenerationError(
                 f"model must be one of: {', '.join(('auto', 'gemini') + GRID_IMAGEN_MODELS)}")
+        if refine_palette:
+            from backend.pixel_art import RETRO_PALETTES
+            if refine_palette not in RETRO_PALETTES:
+                raise g.GenerationError(
+                    f"refine_palette must be one of: {', '.join(sorted(RETRO_PALETTES))}")
         do_isolate = preset["isolate"] if isolate is None else isolate
         do_pad = (preset["pad"] if pad_to_square is None else pad_to_square) and do_isolate
         bg = (background or preset["background"]).strip()
@@ -281,27 +308,41 @@ def register(mcp, ctx):
         base = storage.safe_filename(filename or (kind if kind != "custom" else (style[:24] or "grid")))
         results = []
         for idx, cell in enumerate(cells):
-            if cell_size and cell.width < cell_size:
+            # LANCZOS enlarge would smear the logical pixel grid — when refining,
+            # the pixel refiner integer-upscales toward cell_size instead
+            if cell_size and cell.width < cell_size and not pixel_refine:
                 scale = cell_size / cell.width
                 cell = cell.resize((cell_size, max(1, int(cell.height * scale))), Image.LANCZOS)
             buf = io.BytesIO(); cell.save(buf, "PNG")
             out_bytes = buf.getvalue()
             isolated = False
+            refine_report = None
             if do_isolate:
                 cut = await engine.run_pipeline(out_bytes, iso_opts)
                 cut_im = Image.open(io.BytesIO(cut))
                 alpha_box = (cut_im.getchannel("A").getbbox()
                              if cut_im.mode == "RGBA" else cut_im.getbbox())
                 if alpha_box:
-                    out_bytes = _square_pad(cut, size=cell_size) if do_pad else cut
+                    if pixel_refine:
+                        cut, refine_report = await engine.pixel_refine(
+                            cut, max_colors=refine_max_colors, palette=refine_palette,
+                            target_px=0 if do_pad else (cell_size or 0))
+                    out_bytes = (_square_pad(cut, size=cell_size, pixel=pixel_refine)
+                                 if do_pad else cut)
                     isolated = True
                 else:
                     warnings.append(f"cell {idx + 1}: cutout came back empty; kept the uncut cell")
+            elif pixel_refine:
+                out_bytes, refine_report = await engine.pixel_refine(
+                    out_bytes, max_colors=refine_max_colors, palette=refine_palette,
+                    target_px=cell_size or 0)
             res = await storage.save_result(out_bytes, project=project, subpath=subpath,
                                             filename=f"{base}-{idx + 1}", ext="png", cfg=cfg)
             if idx < n:
                 res["subject"] = subs[idx]
             res["isolated"] = isolated
+            if refine_report is not None:
+                res["refine"] = refine_report
             results.append(res)
         grid_res = await storage.save_result(sheet, project=project, subpath=subpath,
                                              filename=f"{base}-GRID", ext="png", cfg=cfg)

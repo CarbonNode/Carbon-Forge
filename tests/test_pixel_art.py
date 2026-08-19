@@ -250,6 +250,38 @@ def test_refine_grid_off_preserves_size():
     assert report["grid"]["mode"] == "off"
 
 
+def test_refine_target_px_picks_integer_scale():
+    logical = make_logical(seed=15, w=20, h=20)
+    big = upscale(logical, 6)
+    out_bytes, report = pa.refine_pixel_art(to_png(big), target_px=512,
+                                            trim=False)
+    img = Image.open(io.BytesIO(out_bytes))
+    # 20px logical -> largest integer scale under 512 is x25, capped at x32 -> 25
+    assert report["export_scale"] == 25
+    assert img.size == (500, 500)
+
+
+def test_refine_explicit_scale_beats_target_px():
+    logical = make_logical(seed=16, w=16, h=16)
+    out_bytes, report = pa.refine_pixel_art(to_png(logical), grid="off",
+                                            scale=2, target_px=512, trim=False)
+    img = Image.open(io.BytesIO(out_bytes))
+    assert img.size == (32, 32)
+    assert report["export_scale"] == 2
+
+
+def test_refine_split_sprite_shape():
+    # the split_sprites integration path: a small already-transparent sprite
+    # (as run_split_pipeline emits) refined with auto grid
+    logical = make_logical(seed=17, w=12, h=12, colors=4)
+    logical[:2] = 0
+    logical[:, :2] = 0
+    big = upscale(logical, 8, blur=0.6)
+    out_bytes, report = pa.refine_pixel_art(to_png(big), max_colors=4)
+    assert report["grid"]["cell_w"] == 8 and report["grid"]["cell_h"] == 8
+    assert report["colors_after"] <= 4
+
+
 def test_refine_unknown_palette_raises():
     logical = make_logical(seed=14, w=8, h=8)
     with pytest.raises(ValueError, match="Unknown palette"):

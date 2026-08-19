@@ -79,6 +79,10 @@ def register(mcp, ctx):
         watermark_remove: bool = False,
         watermark_position: str = "bottom-right",
         watermark_size_pct: int = 15,
+        pixel_refine: bool = False,
+        refine_max_colors: int = 0,
+        refine_palette: str | None = None,
+        refine_scale: int = 1,
         subpath: str | None = None,
         filename: str | None = None,
     ) -> dict:
@@ -100,7 +104,15 @@ def register(mcp, ctx):
           colors to key out on top of the auto-detected one.
         - edge_strength (1–100) / edge_trim (px): defringe strength and edge erosion — edge_trim also
           severs thin bridges so touching pieces don't merge into one sprite.
-        - watermark_remove (+ position/size_pct): LaMa-inpaint a watermark before splitting."""
+        - watermark_remove (+ position/size_pct): LaMa-inpaint a watermark before splitting.
+        - pixel_refine=true: run each split sprite through the pixel-art refiner — when the sheet
+          is AI "pixel art", each sprite is grid-detected and resampled to TRUE low-res pixels
+          (see the pixel_refine tool). refine_max_colors (k-means), refine_palette (retro palette
+          name), refine_scale (integer re-upscale of the refined sprite) tune it; each sprite's
+          result carries a 'refine' report (detected cell size, confidence, color counts)."""
+        if refine_palette and refine_palette not in RETRO_PALETTES:
+            return {"error": f"Unknown refine_palette '{refine_palette}' — available: "
+                             f"{', '.join(sorted(RETRO_PALETTES))}"}
         src = await storage.resolve_input(image, cfg=cfg, kind="image")
         if skip_bg:
             sprites = await engine.split_only(src.data, min_sprite_area)
@@ -117,8 +129,16 @@ def register(mcp, ctx):
         base = filename or "sprite"
         results = []
         for i, s in enumerate(sprites, 1):
-            results.append(await storage.save_result(
-                s, project=project, subpath=subpath, filename=f"{base}-{i}", ext="png", cfg=cfg))
+            report = None
+            if pixel_refine:
+                s, report = await engine.pixel_refine(
+                    s, max_colors=refine_max_colors, palette=refine_palette,
+                    scale=refine_scale)
+            res = await storage.save_result(
+                s, project=project, subpath=subpath, filename=f"{base}-{i}", ext="png", cfg=cfg)
+            if report is not None:
+                res["refine"] = report
+            results.append(res)
         return {"count": len(results), "sprites": results}
 
     @mcp.tool()
@@ -227,6 +247,7 @@ def register(mcp, ctx):
         outline_color: str = "#000000",
         trim: bool = True,
         scale: int = 1,
+        target_px: int = 0,
         subpath: str | None = None,
         filename: str | None = None,
     ) -> dict:
@@ -264,6 +285,8 @@ def register(mcp, ctx):
         trim: crop transparent margins (default true).
         scale: integer nearest-neighbor upscale of the final sprite (1-32) —
           e.g. scale=4 to make the crisp result visible in a chat preview.
+          Or set target_px (e.g. 512) to auto-pick the largest integer scale
+          that keeps the longest side at or under that many pixels.
 
         Returns the saved sprite plus an 'analysis' report: detected cell
         size/offset, grid confidence, logical output size, and color counts
@@ -288,7 +311,8 @@ def register(mcp, ctx):
             bg_tolerance=bg_tolerance, max_colors=max_colors,
             palette=palette_colors or palette, dither=dither,
             dither_strength=dither_strength, outline=outline,
-            outline_color=outline_color, trim=trim, scale=scale)
+            outline_color=outline_color, trim=trim, scale=scale,
+            target_px=target_px)
         res = await storage.save_result(out, project=project, subpath=subpath,
                                         filename=filename or "pixel-refined",
                                         ext="png", cfg=cfg)
