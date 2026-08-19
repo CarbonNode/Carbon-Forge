@@ -20,7 +20,7 @@ RUN apt-get update \
     && npm install -g @gltf-transform/cli@4 \
     && npm cache clean --force
 
-COPY backend/__init__.py backend/processing.py backend/
+COPY backend/__init__.py backend/processing.py backend/pixel_art.py backend/
 COPY forge_mcp/ forge_mcp/
 
 ENV U2NET_HOME=/models/u2net \
