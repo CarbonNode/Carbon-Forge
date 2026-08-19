@@ -714,14 +714,25 @@ def register(mcp, ctx):
                                           sample_count=1, aspect_ratio="1:1"))[0]
             engine_str = "imagen-4"
         out = raster
+        is_pixel_style = "pixel" in style.lower()
+        refine_report = None
         if transparent:
             opts = PipelineOptions(model="isnet-general-use", alpha_matting=True, edge_smooth=True,
                                    auto_trim=True, color_remove=True, color_auto_detect=True)
             out = await engine.run_pipeline(raster, opts)
-            out = _square_pad(out, size=size)
+            # pixel-art styled icons get grid-refined to true low-res pixels; the
+            # reconstruction gate keeps 1:1 when the render has no real grid
+            if is_pixel_style:
+                out, refine_report = await engine.pixel_refine(out)
+            grid_found = bool(refine_report and refine_report["grid"]["detected"])
+            out = _square_pad(out, size=size, pixel=grid_found)
+        elif is_pixel_style:
+            out, refine_report = await engine.pixel_refine(out, target_px=size)
         res = await storage.save_result(out, project=project, subpath=subpath,
                                         filename=storage.safe_filename(filename or subject[:40]), ext="png", cfg=cfg)
         res["engine"] = f"icon/{engine_str}"
+        if refine_report is not None:
+            res["refine"] = refine_report
         return {"image": res, "engine": res["engine"], "prompt": prompt}
 
     async def _poll_and_finish(job_id: str, op: str):
