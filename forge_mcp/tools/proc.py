@@ -1,4 +1,5 @@
 """Image-processing tools — all delegate to the shared desktop pipeline."""
+from backend.pixel_art import DITHER_MODES, RETRO_PALETTES
 from backend.processing import PipelineOptions, parse_colors
 from forge_mcp import engine, storage
 
@@ -205,3 +206,91 @@ def register(mcp, ctx):
             clean_min_px=min_pocket_px, clean_max_frac=max_pocket_frac, clean_feather=feather))
         return await storage.save_result(out, project=project, subpath=subpath,
                                          filename=filename or "cleaned", ext="png", cfg=cfg)
+
+    @mcp.tool()
+    async def pixel_refine(
+        image: str,
+        project: str,
+        grid: str = "auto",
+        cell_size: int = 0,
+        max_cells: int = 512,
+        sampling: str = "medoid",
+        remove_bg: bool = False,
+        bg_color: str | None = None,
+        bg_tolerance: int = 24,
+        max_colors: int = 0,
+        palette: str | None = None,
+        palette_colors: list[str] | None = None,
+        dither: str = "none",
+        dither_strength: float = 1.0,
+        outline: str = "none",
+        outline_color: str = "#000000",
+        trim: bool = True,
+        scale: int = 1,
+        subpath: str | None = None,
+        filename: str | None = None,
+    ) -> dict:
+        """Refine AI-generated pixel art into TRUE low-resolution pixel art
+        (PixelRefiner pipeline). AI models emit "fake" pixel art: a big image
+        whose logical pixels are soft ~NxN blocks with anti-aliased edges and
+        thousands of near-duplicate colors. This tool detects the logical
+        pixel grid, resamples each cell to one crisp color (Oklab medoid), and
+        optionally reduces colors / maps to a retro palette — producing a real
+        sprite (e.g. 1024x1024 in → 128x128 out) that game engines can use.
+        Use it after generate_image/generate_local whenever the prompt asked
+        for pixel art, sprites, or 8/16-bit style. No AI model involved: fast,
+        deterministic, and it never repaints — every output color comes from
+        the source.
+
+        image: https URL or workspace path '<Project>/<relative path>'.
+        grid: 'auto' (detect cell size + offset; the default) or 'off' (keep
+          resolution 1:1 — use for already-true pixel art you only want to
+          quantize/outline). cell_size > 0 forces a manual cell size instead.
+        sampling: 'medoid' (default, crisp — picks the most representative
+          real pixel from each cell's core), 'mean' (soft area average), or
+          'hard' (medoid + binary alpha, for sprites needing hard edges).
+        remove_bg (+ bg_color '#rrggbb', bg_tolerance): key out a flat
+          background color first (auto-samples the border when bg_color is
+          unset). For complex backgrounds run remove_background first instead.
+        max_colors: k-means color reduction in Oklab space (0 = off).
+        palette: map to a built-in retro palette — arne16, c64, gb_legacy,
+          gb_light, gb_pocket, mono, msx, nes, pc98, pico8, sfc_bg,
+          sfc_sprite. palette_colors: custom palette as '#rrggbb' hex strings
+          (overrides palette).
+        dither: none | floyd-steinberg | bayer-2x2 | bayer-4x4 | bayer-8x8 |
+          ordered (+ dither_strength 0-1).
+        outline: 'rounded' (8-way) or 'sharp' (4-way) 1px outline in
+          outline_color (canvas grows 1px per side).
+        trim: crop transparent margins (default true).
+        scale: integer nearest-neighbor upscale of the final sprite (1-32) —
+          e.g. scale=4 to make the crisp result visible in a chat preview.
+
+        Returns the saved sprite plus an 'analysis' report: detected cell
+        size/offset, grid confidence, logical output size, and color counts
+        before/after. If the grid detection picked a wrong size (check
+        analysis.grid), re-run with cell_size set explicitly."""
+        for name, value, allowed in (
+            ("grid", grid, ("auto", "off")),
+            ("sampling", sampling, ("medoid", "mean", "hard")),
+            ("dither", dither, DITHER_MODES),
+            ("outline", outline, ("none", "rounded", "sharp")),
+        ):
+            if value not in allowed:
+                return {"error": f"Invalid {name} '{value}' — "
+                                 f"use one of: {', '.join(allowed)}"}
+        if palette and palette not in RETRO_PALETTES:
+            return {"error": f"Unknown palette '{palette}' — available: "
+                             f"{', '.join(sorted(RETRO_PALETTES))}"}
+        src = await storage.resolve_input(image, cfg=cfg, kind="image")
+        out, report = await engine.pixel_refine(
+            src.data, grid=grid, cell_size=cell_size, max_cells=max_cells,
+            sampling=sampling, remove_bg=remove_bg, bg_color=bg_color,
+            bg_tolerance=bg_tolerance, max_colors=max_colors,
+            palette=palette_colors or palette, dither=dither,
+            dither_strength=dither_strength, outline=outline,
+            outline_color=outline_color, trim=trim, scale=scale)
+        res = await storage.save_result(out, project=project, subpath=subpath,
+                                        filename=filename or "pixel-refined",
+                                        ext="png", cfg=cfg)
+        res["analysis"] = report
+        return res

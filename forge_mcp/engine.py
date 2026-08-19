@@ -4,7 +4,7 @@ import asyncio
 import os
 import threading
 
-from backend import processing
+from backend import pixel_art, processing
 from backend.processing import PipelineOptions, AVAILABLE_MODELS, DEFAULT_MODEL  # noqa: F401 (re-export)
 
 _cpu_gate = asyncio.Semaphore(2)
@@ -36,6 +36,13 @@ async def run_split_pipeline(data: bytes, opts: PipelineOptions, min_area: int) 
 async def split_only(data: bytes, min_area: int) -> list:
     async with _cpu_gate:
         return await asyncio.to_thread(processing.split_sprites, data, min_area)
+
+
+async def pixel_refine(data: bytes, **kwargs) -> tuple:
+    """PixelRefiner pipeline (backend.pixel_art) — pure NumPy, no model load."""
+    async with _cpu_gate:
+        return await asyncio.to_thread(
+            lambda: pixel_art.refine_pixel_art(data, **kwargs))
 
 
 def status() -> dict:
