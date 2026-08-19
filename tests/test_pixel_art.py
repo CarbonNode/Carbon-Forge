@@ -57,6 +57,24 @@ def test_detect_grid_with_blur():
     assert g["cell_w"] == 8 and g["cell_h"] == 8
 
 
+def test_detect_grid_blob_with_blur_and_noise():
+    # regression: a round sprite on transparency, blurred + noisy — coarse
+    # periods with only a handful of boundary lines used to out-score the
+    # true cell size via max-over-offsets cherry-picking (picked 30x20)
+    rng = np.random.default_rng(99)
+    logical = make_logical(seed=99, w=48, h=48, colors=8)
+    yy, xx = np.mgrid[0:48, 0:48]
+    outside = ((yy - 24) ** 2 + (xx - 24) ** 2) >= 20 ** 2
+    logical[outside] = 0
+    big = upscale(logical, 10, blur=1.5)
+    noise = rng.normal(0, 5, big[..., :3].shape)
+    big[..., :3] = np.clip(big[..., :3].astype(float) + noise,
+                           0, 255).astype(np.uint8)
+    g = pa.detect_grid(big)
+    assert g["detected"]
+    assert g["cell_w"] == 10 and g["cell_h"] == 10
+
+
 def test_detect_grid_survives_transparent_background():
     logical = make_logical(seed=3, w=16, h=16)
     logical[:4, :, 3] = 0  # transparent band

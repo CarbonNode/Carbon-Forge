@@ -214,12 +214,18 @@ def _detect_axis(profile, length, max_cells):
     positions = np.arange(1, length)
 
     def evidence(s):
-        folded_g = np.bincount(positions % s, weights=g, minlength=s)
-        folded_w = np.bincount(positions % s, weights=wprof, minlength=s)
+        residues = positions % s
+        folded_g = np.bincount(residues, weights=g, minlength=s)
+        folded_w = np.bincount(residues, weights=wprof, minlength=s)
         means = np.where(folded_w > 0, folded_g / np.maximum(folded_w, 1e-12),
                          0.0)
-        off = int(np.argmax(means))
-        return off, float(means[off] / overall)
+        # shrink by the number of boundary lines backing each offset — a coarse
+        # period has few lines and many offsets to cherry-pick from, which
+        # otherwise inflates its max-over-offsets evidence past the true period
+        counts = np.bincount(residues, minlength=s)
+        shrunk = means * np.sqrt(counts / (counts + 8))
+        off = int(np.argmax(shrunk))
+        return off, float(shrunk[off] / overall)
 
     best = None
     for s in range(min_cell, max_cell + 1):
