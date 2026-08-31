@@ -9,17 +9,20 @@ import httpx
 GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_GEMINI_IMAGE_MODEL = "gemini-2.5-flash-image"
 
+# Google retired the Imagen :predict models from the v1beta API (every imagen-4.0-*
+# id 404s as of 2026-08-31, verified on both configured keys), so the imagen-* tool
+# aliases now resolve to Gemini image models served via generateContent (call_imagen).
 IMAGE_MODEL_ALIASES = {
-    "imagen-4": "imagen-4.0-generate-001",
-    "imagen-4-fast": "imagen-4.0-fast-generate-001",
-    "imagen-4-ultra": "imagen-4.0-ultra-generate-001",
+    "imagen-4": "gemini-3.1-flash-image",
+    "imagen-4-fast": "gemini-2.5-flash-image",
+    "imagen-4-ultra": "gemini-3-pro-image",
 }
 VIDEO_MODEL_ALIASES = {
     "veo-3": "veo-3.0-generate-001",
     "veo-3-fast": "veo-3.0-fast-generate-001",
     "veo-2": "veo-2.0-generate-001",
 }
-IMAGEN_MAX_BATCH = {"imagen-4.0-ultra-generate-001": 1}  # Ultra returns one sample per call
+IMAGEN_MAX_BATCH = {"gemini-3-pro-image": 1}  # pro tier: cap at one sample per call (cost)
 
 IMAGE_ASPECTS = ("1:1", "3:4", "4:3", "9:16", "16:9")
 VIDEO_ASPECTS = ("16:9", "9:16")
@@ -108,17 +111,35 @@ async def _gemini_fetch(client, url, api_key, body):
 
 
 async def call_imagen(client, api_key, model, prompt, sample_count=1, aspect_ratio="1:1") -> list:
-    url = f"{GEMINI_API}/models/{model}:predict"
+    """Text->image via a Gemini image model (generateContent). The Imagen :predict
+    endpoint this wrapped until 2026-08 is gone upstream (404 for every imagen-4.0-*
+    model), so the same contract is now served by gemini-*-image models: one image
+    per request, sample_count fans out concurrent requests."""
+    url = f"{GEMINI_API}/models/{model}:generateContent"
     body = {
-        "instances": [{"prompt": prompt}],
-        "parameters": {
-            "sampleCount": max(1, min(4, sample_count)),
-            "aspectRatio": aspect_ratio,
-            "personGeneration": "allow_adult",
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["TEXT", "IMAGE"],
+            "imageConfig": {"aspectRatio": aspect_ratio},
         },
     }
-    json_resp = await _gemini_fetch(client, url, api_key, body)
-    return parse_imagen_predictions(json_resp)
+    n = max(1, min(4, sample_count))
+    results = await asyncio.gather(
+        *(_gemini_fetch(client, url, api_key, body) for _ in range(n)),
+        return_exceptions=True)
+    images, last_err = [], None
+    for r in results:
+        if isinstance(r, BaseException):
+            last_err = r
+            continue
+        images.extend(parse_gemini_parts(r))
+    if not images:
+        if isinstance(last_err, GenerationError):
+            raise last_err
+        if last_err:
+            raise GenerationError(f"Image generation failed: {last_err}")
+        raise GenerationError("Gemini returned no images (prompt may have been refused - try rephrasing)")
+    return images
 
 
 # ---- Gemini image (edit / reference images) ----

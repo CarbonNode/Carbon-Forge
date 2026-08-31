@@ -126,7 +126,8 @@ def register(mcp, ctx):
     async def generate_image(prompt: str, project: str, model: str = "imagen-4",
                              count: int = 1, aspect_ratio: str = "1:1",
                              subpath: str | None = None, filename: str | None = None) -> dict:
-        """Generate image(s) from a text prompt with Imagen 4.
+        """Generate image(s) from a text prompt with Google's Gemini image models
+        (the imagen-* aliases are retained; Imagen itself was retired upstream).
         model: imagen-4 | imagen-4-fast | imagen-4-ultra. count: 1-4 (ultra max 1).
         aspect_ratio: 1:1, 3:4, 4:3, 9:16, 16:9. Saves into the project's workspace folder.
 
