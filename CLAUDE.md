@@ -134,6 +134,16 @@ gets its own grid, palette and bounding box and the result boils.
 - **Atlas format:** Aseprite JSON-array (`frames[]` + `meta.frameTags` + our `meta.layout`); Phaser
   `this.load.aseprite(key, sheet, atlas)`, Godot/Unity Aseprite importers read it directly.
   `columns=0` = one horizontal strip (CSS `steps()` in the bundled `preview.html`).
+- **The pixel-art FEEL (2026-09-08, Rober: "didn't feel pixel art style"):** a 100-px sprite cut into
+  16 evenly spaced frames reads as a downscaled cartoon — video models tween, hand animation holds.
+  What reads as pixel art: `cell_size` so the sprite lands at **32-64 logical px**, **6-8 frames**
+  chosen as distinct KEY POSES (`frame_select:"poses"` — dense 6× sample → `select_poses`
+  farthest-point on changed pixels with a minimum temporal gap), **`hold_timing:true`** (each pose
+  holds for the span it stands for; per-frame durations in atlas + GIF), **12-16 colors**,
+  `outline:"sharp"`. Two things silently broke the look before: the chroma key's tint smeared into
+  edge pixels by video compression, and k-means then LEARNED magenta as a palette entry so every
+  fringe snapped back to it — `despill_key` (on by default with a key) + `is_key_like` palette
+  filtering fix both. Same clip, re-cut: `slam-poses8b` vs the original 16-frame cut.
 - **Tests:** `tests/test_sprite_anim.py` simulates an I2V clip (shift + blur + noise + magenta key)
   and asserts the lock (cell size, palette, shared box, ≤ source colors), plus sheet slicing /
   row tags / shared crop for the sheet path.

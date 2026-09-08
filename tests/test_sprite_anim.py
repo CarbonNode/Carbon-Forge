@@ -4,7 +4,7 @@ import json
 
 import numpy as np
 import pytest
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageSequence
 
 from backend import sprite_anim as sa
 
@@ -326,3 +326,63 @@ def test_rd_snap_frames_and_payload():
         RD.advanced_payload("x", "fly", b"", 64, 64)
     with pytest.raises(Exception):
         RD.advanced_payload("x", "idle", b"", 20, 20)
+
+
+# --- the pixel-art FEEL: despill, key-free palette, pose selection, hold timing ---
+
+def test_despill_removes_magenta_fringe_but_keeps_other_colors():
+    f = np.zeros((2, 2, 4), np.uint8)
+    f[..., 3] = 255
+    f[0, 0, :3] = (200, 40, 190)   # magenta-tinted edge pixel
+    f[0, 1, :3] = (40, 200, 40)    # green stays
+    f[1, 0, :3] = (120, 120, 120)  # grey stays
+    out = sa.despill_key(f, "#FF00FF")
+    assert tuple(out[0, 0, :3]) == (50, 40, 40)          # excess 150 pulled out of R and B
+    assert tuple(out[0, 1, :3]) == (40, 200, 40)
+    assert tuple(out[1, 0, :3]) == (120, 120, 120)
+    assert sa.is_key_like((250, 10, 240), "#FF00FF") and sa.is_key_like((180, 40, 170), "#FF00FF")
+    assert not sa.is_key_like((120, 40, 40), "#FF00FF")
+
+
+def test_lock_style_palette_excludes_key_fringe():
+    spr = logical_sprite(size=20, pad=4)
+    # paint a magenta-tinted rim inside the sprite, as video compression does
+    spr[4, 4:24, :3] = (230, 30, 220)
+    style = sa.lock_style(png(upscale(spr, 8)), (224, 224), max_colors=6, key_color="#FF00FF")
+    assert not any(sa.is_key_like(sa.pa.parse_hex_color(c), "#FF00FF") for c in style["palette"])
+
+
+def test_select_poses_spacing_and_distinctness():
+    base = logical_sprite(size=16, pad=2)
+    frames = []
+    for i in range(24):
+        f = base.copy()
+        if 8 <= i < 12:      # a big pose in the middle
+            f = np.roll(f, 6, axis=0)
+        elif i >= 18:        # another late
+            f = np.roll(f, 5, axis=1)
+        frames.append(f)
+    picks = sa.select_poses(frames, 4, min_gap=3)
+    assert picks[0] == 0 and len(picks) == 4
+    assert any(8 <= p < 12 for p in picks) and any(p >= 18 for p in picks)
+    assert all(b - a >= 3 for a, b in zip(picks, picks[1:]))
+
+
+def test_build_animation_poses_and_hold_timing():
+    spr = logical_sprite(size=20, pad=4)
+    dense = fake_video_frames(spr, n=24)
+    times = [i * 0.1 for i in range(24)]
+    res = sa.build_animation(dense, reference=png(upscale(spr, 16)), key_color="#FF00FF",
+                             frame_select="poses", pose_count=6, dedupe=False, hold_timing=True,
+                             source_times=times, clip_seconds=2.4, fps=8)
+    rep = res["report"]
+    assert rep["frame_select"] == "poses" and rep["despill"] is True
+    assert rep["frames_out"] <= 6 and rep["kept_frame_indices"][0] == 0
+    assert len(rep["durations_ms"]) == rep["frames_out"] and sum(rep["durations_ms"]) >= 2000
+    atlas_durs = [f["duration"] for f in res["atlas"]["frames"]]
+    assert atlas_durs == rep["durations_ms"]
+    g = Image.open(io.BytesIO(res["gif"]))
+    # Pillow merges identical consecutive GIF frames (and adds their durations)
+    assert 1 < g.n_frames <= rep["frames_out"]
+    total = sum(fr.info.get("duration", 0) for fr in ImageSequence.Iterator(g))
+    assert abs(total - sum(rep["durations_ms"])) <= 20

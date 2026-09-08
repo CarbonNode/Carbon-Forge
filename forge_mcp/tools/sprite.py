@@ -147,6 +147,8 @@ def register(mcp, ctx):
         video_input: str,
         project: str,
         frames: int = 8,
+        frame_select: str = "even",
+        hold_timing: bool = False,
         reference_sprite: str | None = None,
         key_color: str | None = "auto",
         key_tolerance: int = sa.DEFAULT_KEY_TOLERANCE,
@@ -181,8 +183,17 @@ def register(mcp, ctx):
         to the palette, cropped to one shared bounding box, duplicates dropped.
 
         video_input / reference_sprite: https URL or workspace path '<Project>/<relative path>'.
-        frames: how many to sample, evenly spaced over [start, end] (default the whole clip;
-          loop=true stops one step short of the end so a cycle doesn't repeat its first pose).
+        frames: how many to keep. frame_select 'even' (default) samples them evenly over
+          [start, end] (loop=true stops one step short of the end so a cycle doesn't repeat
+          its first pose). frame_select 'poses' is what makes video output FEEL like pixel
+          animation: the clip is sampled densely (6x frames) and only `frames` DISTINCT key
+          poses are kept — crouch, wind-up, strike, burst — the tweens between them are
+          dropped, like hand-keyed animation. hold_timing=true then gives each kept pose the
+          duration of the span it stands for (atlas + GIF), so the motion's rhythm survives.
+        THE PIXEL-ART FEEL (learned the hard way): a 100-px sprite with 16 evenly spaced frames
+          reads as a downscaled cartoon. What reads as pixel art: cell_size so the sprite lands
+          at 32-64 logical px, 6-8 pose frames, max_colors 12-16, outline 'sharp'. The key's
+          chroma is despilled out of edge pixels and kept out of the palette automatically.
         key_color: '#rrggbb' flat background to key out, 'auto' (default — sample the first
           frame's border) or null to keep frames opaque. key_tolerance: 0-255 (48 default;
           raise for heavily compressed clips).
@@ -202,13 +213,17 @@ def register(mcp, ctx):
         if reference_sprite:
             ref_bytes = (await storage.resolve_input(reference_sprite, cfg=cfg, kind="image")).data
         frames = max(1, min(64, int(frames)))
-        pngs, times, info = await _frames_from_video(src.data, src.mime, frames, start, end, loop)
+        poses = (frame_select or "even").lower() == "poses"
+        sample_n = min(96, frames * 6) if poses else frames
+        pngs, times, info = await _frames_from_video(src.data, src.mime, sample_n, start, end, loop)
         res = await asyncio.to_thread(
             sa.build_animation, pngs, reference=ref_bytes, cell_size=cell_size, max_colors=max_colors,
             palette=palette, palette_colors=palette_colors, key_color=key_color,
             key_tolerance=key_tolerance, dither=dither, outline=outline, outline_color=outline_color,
             dedupe=dedupe, columns=columns, padding=padding, scale=scale, fps=fps,
-            name=storage.safe_filename(name), source_times=times)
+            name=storage.safe_filename(name), source_times=times,
+            frame_select="poses" if poses else "even", pose_count=frames if poses else 0,
+            hold_timing=hold_timing, clip_seconds=info.get("duration_s"))
         return await _deliver(res, name=storage.safe_filename(name), project=project, subpath=subpath,
                               cfg=cfg, extra={"video": info, "sampled_times_s": times})
 
@@ -443,7 +458,8 @@ def register(mcp, ctx):
                                                          refine_kwargs.pop("start"), refine_kwargs.pop("end"),
                                                          refine_kwargs.pop("loop"))
             res = await asyncio.to_thread(sa.build_animation, pngs, reference=start_png, name=name,
-                                          source_times=times, **refine_kwargs)
+                                          source_times=times, clip_seconds=info.get("duration_s"),
+                                          **refine_kwargs)
             sheet = await _deliver(res, name=name, project=job["project"], subpath=job["subpath"], cfg=cfg,
                                    extra={"kind": "animation", "sampled_times_s": times, "video": info})
             results.append(sheet)
@@ -466,6 +482,8 @@ def register(mcp, ctx):
         size: int = 0,
         lock_palette: bool = False,
         frames: int = 8,
+        frame_select: str = "even",
+        hold_timing: bool = False,
         seconds: float = 2.0,
         fps: int = 12,
         key_color: str = sa.DEFAULT_KEY_COLOR,
@@ -521,7 +539,11 @@ def register(mcp, ctx):
         motion: what the sprite does — "walk cycle", "idle breathing, cape swaying",
           "sword slash attack", "jump", "run cycle", "death animation". The camera-lock /
           flat-background / loop wording is added for you (negative_prompt overrides ours).
-        frames: frames to sample (8 for walk/idle, 6 for attacks, up to 32).
+        frames: frames to keep (8 for walk/idle, 6 for attacks, up to 32).
+        frame_select 'poses' + hold_timing: keep `frames` DISTINCT key poses out of a dense
+          sample instead of evenly spaced tweens, each held for the span it stands for — the
+          keyframed feel of hand animation; for big attacks pair it with cell_size that lands
+          the sprite at 32-64 logical px, max_colors 12-16 and outline 'sharp'.
         seconds: clip length to generate (2-5; longer = more distinct poses).
         fps: playback rate for the atlas + GIF (not the video's).
         max_colors / palette / palette_colors / cell_size / outline / dedupe / columns /
@@ -593,8 +615,11 @@ def register(mcp, ctx):
         safe = storage.safe_filename(name or f"{motion[:24]}-sprite")
         job = jobs.create(kind="animate-sprite", model="wan-i2v", prompt=prompt, project=project,
                           subpath=subpath, filename=safe)
-        refine_kwargs = dict(frames=max(1, min(32, int(frames))), start=None, end=None, loop=True,
-                             **refine_common)
+        poses = (frame_select or "even").lower() == "poses"
+        n_frames = max(1, min(32, int(frames)))
+        refine_kwargs = dict(frames=min(96, n_frames * 6) if poses else n_frames, start=None, end=None, loop=True,
+                             frame_select="poses" if poses else "even", pose_count=n_frames if poses else 0,
+                             hold_timing=hold_timing, **refine_common)
         asyncio.create_task(_run_animate_sprite_job(job["id"], start_png, prep_info, prompt, neg, w, h,
                                                     length, steps, seed, fps_video, refine_kwargs, safe))
         return {"job_id": job["id"], "status": "running", "prepare": prep_info,

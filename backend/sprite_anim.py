@@ -218,6 +218,7 @@ def lock_style(reference, frame_size, *, cell_size=0, max_colors=DEFAULT_MAX_COL
     if key_color:
         ref = pa.key_background(ref, color=pa.parse_hex_color(key_color),
                                 tolerance=key_tolerance)
+        ref = despill_key(ref, key_color)
 
     if cell_size and int(cell_size) > 1:
         cs = int(cell_size)
@@ -264,9 +265,14 @@ def lock_style(reference, frame_size, *, cell_size=0, max_colors=DEFAULT_MAX_COL
         report["palette"] = palette
     elif max_colors and int(max_colors) > 0:
         src = small_ref if small_ref is not None else ref
-        pal = pa.kmeans_palette(src, int(max_colors))
+        k = int(max_colors)
+        pal = pa.kmeans_palette(src, k + (4 if key_color else 0))
+        if key_color:
+            # the fringe the key leaves behind must not become a palette entry
+            kept = [c for c in pal if not is_key_like(c, key_color)]
+            pal = np.array(kept[:k]) if kept else pal[:k]
         pal_hex = [_hex(c) for c in pal]
-        report["palette"] = f"kmeans-{int(max_colors)} (from reference)"
+        report["palette"] = f"kmeans-{k} (from reference)"
     else:
         report["palette"] = None
 
@@ -278,9 +284,98 @@ def lock_style(reference, frame_size, *, cell_size=0, max_colors=DEFAULT_MAX_COL
 # 2. Per-frame refinement on the locked grid + palette
 # ---------------------------------------------------------------------------
 
+def _key_channels(key_rgb):
+    """(dominant, recessive) channel indices of a chroma key: magenta → ([0, 2], [1]),
+    green → ([1], [0, 2]). None when the key has no clear chroma (grey)."""
+    k = [int(v) for v in key_rgb]
+    dom = [i for i in range(3) if k[i] >= 128]
+    rec = [i for i in range(3) if k[i] < 128]
+    if not dom or not rec:
+        return None
+    return dom, rec
+
+
+def despill_key(rgba, key_color, strength=1.0):
+    """Remove the chroma-key tint that video compression smears into a sprite's
+    edges (and that a k-means palette then LEARNS): the key's excess — how far
+    its dominant channels rise above its recessive ones — is pulled back to
+    neutral. Magenta key: min(R, B) - G. Green key: G - max(R, B)."""
+    ch = _key_channels(pa.parse_hex_color(key_color))
+    if ch is None:
+        return rgba
+    dom, rec = ch
+    f = rgba.astype(np.int16)
+    excess = np.clip(np.min(f[..., dom], axis=-1) - np.max(f[..., rec], axis=-1), 0, None)
+    pull = (excess * float(strength)).astype(np.int16)
+    for i in dom:
+        f[..., i] = f[..., i] - pull
+    out = np.clip(f, 0, 255).astype(np.uint8)
+    out[..., 3] = rgba[..., 3]
+    return out
+
+
+def is_key_like(rgb, key_color, tolerance=90, excess=60):
+    """A palette entry that IS the key (within tolerance) or carries the key's
+    chroma (excess above `excess`) — those entries make every keyed fringe
+    pixel snap back to the key color."""
+    key = np.asarray(pa.parse_hex_color(key_color), dtype=np.int16)
+    c = np.asarray(rgb, dtype=np.int16)
+    if int(np.abs(c - key).sum()) < tolerance:
+        return True
+    ch = _key_channels(key)
+    if ch is None:
+        return False
+    dom, rec = ch
+    return int(c[dom].min() - c[rec].max()) > excess
+
+
+def select_poses(frames, count, min_gap=1, threshold=24):
+    """Pick `count` DISTINCT poses out of densely sampled logical frames —
+    farthest-point selection on "how many pixels changed", with a minimum
+    temporal gap so subtle early wobble cannot crowd out the big moves.
+    Frame 0 is always kept (the resting pose the loop returns to). Returns
+    sorted indices. This is what makes video output feel keyframed: tweens
+    between poses are dropped instead of sampled."""
+    n = len(frames)
+    if count >= n:
+        return list(range(n))
+    arrs = [np.asarray(f, dtype=np.int16) for f in frames]
+
+    def dist(a, b):
+        if a.shape != b.shape:
+            return 1.0
+        return float((np.abs(a - b).sum(-1) > threshold).mean())
+
+    picked = [0]
+    gap = max(1, int(min_gap))
+    while len(picked) < count:
+        cands = [i for i in range(n) if all(abs(i - p) >= gap for p in picked)]
+        if not cands:
+            break
+        best = max((min(dist(arrs[i], arrs[p]) for p in picked), i) for i in cands)
+        picked.append(best[1])
+    return sorted(picked)
+
+
+def hold_durations(times, fps, total_s=None):
+    """Per-frame durations (ms) from the SOURCE timestamps of the kept frames:
+    a pose that stands for a long span of the clip holds longer — the timing
+    of the original motion survives pose selection. The last frame gets the
+    remaining clip time (or one base frame)."""
+    base = int(round(1000.0 / max(1, fps)))
+    if not times or len(times) < 2:
+        return [base] * (len(times) if times else 1)
+    out = []
+    for i in range(len(times) - 1):
+        out.append(max(base // 2, int(round((times[i + 1] - times[i]) * 1000))))
+    tail = int(round((total_s - times[-1]) * 1000)) if total_s else base
+    out.append(max(base // 2, tail))
+    return out
+
+
 def refine_frame(frame, cell_size, *, palette=None, sampling="medoid",
                  key_color=None, key_tolerance=DEFAULT_KEY_TOLERANCE,
-                 dither="none", dither_strength=1.0, hard_alpha=True):
+                 dither="none", dither_strength=1.0, hard_alpha=True, despill=False):
     """One video frame -> logical-resolution RGBA array on a FIXED grid.
 
     Background keying happens AFTER cell sampling: the medoid already threw
@@ -299,6 +394,8 @@ def refine_frame(frame, cell_size, *, palette=None, sampling="medoid",
     if hard_alpha:
         a = small[..., 3]
         small[..., 3] = np.where(a >= 128, 255, 0).astype(np.uint8)
+    if despill and key_color:
+        small = despill_key(small, key_color)
     if palette:
         pal = np.stack([pa.parse_hex_color(c) for c in palette])
         small = pa.apply_palette(small, pal, dither=dither, strength=dither_strength)
@@ -386,7 +483,7 @@ def _frame_tags(tags, n, name):
 
 
 def pack_sheet(frames, *, columns=0, padding=0, scale=1, name="sprite", fps=12,
-               tags=None, source_times=None):
+               tags=None, source_times=None, durations=None):
     """Pack same-size RGBA frames into a sheet.
 
     Returns (sheet_png_bytes, atlas_dict). The atlas follows Aseprite's JSON
@@ -421,7 +518,7 @@ def pack_sheet(frames, *, columns=0, padding=0, scale=1, name="sprite", fps=12,
             "rotated": False, "trimmed": False,
             "spriteSourceSize": {"x": 0, "y": 0, "w": int(ew), "h": int(eh)},
             "sourceSize": {"w": int(ew), "h": int(eh)},
-            "duration": dur_ms,
+            "duration": int(durations[i]) if durations and i < len(durations) else dur_ms,
         }
         if source_times is not None and i < len(source_times):
             entry["source_time_s"] = source_times[i]
@@ -442,7 +539,7 @@ def pack_sheet(frames, *, columns=0, padding=0, scale=1, name="sprite", fps=12,
     return _png_bytes(sheet), atlas
 
 
-def gif_bytes(frames, fps=12, scale=1, loop=0):
+def gif_bytes(frames, fps=12, scale=1, loop=0, durations=None):
     """Looping GIF preview of the frames (nearest-neighbor scaled). Transparent
     pixels stay transparent; every frame shares one palette so it does not
     flicker."""
@@ -472,7 +569,8 @@ def gif_bytes(frames, fps=12, scale=1, loop=0):
         p.putpalette(palette)
         out.append(p)
     buf = io.BytesIO()
-    out[0].save(buf, format="GIF", save_all=True, append_images=out[1:], duration=dur,
+    out[0].save(buf, format="GIF", save_all=True, append_images=out[1:],
+                duration=[int(d) for d in durations] if durations else dur,
                 loop=loop, transparency=255, disposal=2, optimize=False)
     return buf.getvalue()
 
@@ -486,11 +584,20 @@ def build_animation(frame_pngs, *, reference=None, cell_size=0, max_colors=DEFAU
                     key_tolerance=DEFAULT_KEY_TOLERANCE, sampling="medoid",
                     dither="none", dither_strength=1.0, outline="none",
                     outline_color="#000000", dedupe=True, margin=0, columns=0,
-                    padding=0, scale=1, fps=12, name="sprite", source_times=None):
+                    padding=0, scale=1, fps=12, name="sprite", source_times=None,
+                    frame_select="even", pose_count=0, despill=True, hold_timing=False,
+                    clip_seconds=None):
     """Full pipeline: video frames -> {sheet, gif, atlas, frames, report}.
 
     reference: PNG bytes of the source sprite the video was made from (best —
       locks grid + palette to the real sprite); None = lock to the first frame.
+    frame_select: "even" keeps every input frame in order; "poses" treats the
+      input as a DENSE sample and keeps `pose_count` distinct key poses
+      (select_poses) — the keyframed feel of hand animation instead of video
+      tweens. despill: pull the key's chroma out of edge pixels (on by default
+      when key_color is set). hold_timing: per-frame durations follow the
+      source timestamps (a pose covering a long span holds longer); needs
+      source_times (+ clip_seconds for the last hold).
     key_color: '#rrggbb' background to key out of every frame (and of the
       reference, which is harmless when it has none), or 'auto' to sample the
       first frame's border; None = keep the frames opaque.
@@ -508,20 +615,27 @@ def build_animation(frame_pngs, *, reference=None, cell_size=0, max_colors=DEFAU
                        palette_colors=palette_colors,
                        key_color=key_color, key_tolerance=key_tolerance)
     cs, pal = style["cell_size"], style["palette"]
+    do_despill = bool(despill and key_color)
     small = refine_frames(frame_pngs, cs, palette=pal, sampling=sampling, key_color=key_color,
                           key_tolerance=key_tolerance, dither=dither,
-                          dither_strength=dither_strength)
+                          dither_strength=dither_strength, despill=do_despill)
+    kept_idx = list(range(len(small)))
+    if frame_select == "poses" and pose_count and int(pose_count) < len(small):
+        n = int(pose_count)
+        kept_idx = select_poses(small, n, min_gap=max(1, len(small) // (2 * n)))
+        small = [small[i] for i in kept_idx]
     if outline and outline != "none":
         oc = pa.parse_hex_color(outline_color)
         small = [pa.add_outline(f, oc, style=outline) for f in small]
-    kept_idx = list(range(len(small)))
     if dedupe:
-        small, kept_idx = dedupe_frames(small)
+        small, kept2 = dedupe_frames(small)
+        kept_idx = [kept_idx[i] for i in kept2]
     small, box = crop_union(small, margin=margin)
     times = [source_times[i] for i in kept_idx] if source_times else None
+    durations = hold_durations(times, fps, clip_seconds) if (hold_timing and times) else None
     sheet, atlas = pack_sheet(small, columns=columns, padding=padding, scale=scale,
-                              name=name, fps=fps, source_times=times)
-    gif = gif_bytes(small, fps=fps, scale=scale)
+                              name=name, fps=fps, source_times=times, durations=durations)
+    gif = gif_bytes(small, fps=fps, scale=scale, durations=durations)
     frames_out = [_png_bytes(pa.scale_nearest(f, scale) if scale > 1 else f) for f in small]
     colors = set()
     for f in small:
@@ -540,6 +654,9 @@ def build_animation(frame_pngs, *, reference=None, cell_size=0, max_colors=DEFAU
         "frame_size": [int(small[0].shape[1]), int(small[0].shape[0])],
         "unique_colors": len(colors),
         "export_scale": scale,
+        "frame_select": frame_select,
+        "despill": do_despill,
+        "durations_ms": durations,
     }
     return {"sheet": sheet, "atlas": atlas, "atlas_json": json.dumps(atlas, indent=1),
             "gif": gif, "frames": frames_out, "report": report}
