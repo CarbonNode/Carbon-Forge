@@ -47,6 +47,8 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
                   #   ('<Project>/.conduit/uploads/<name>'), so they feed straight in
 tests/            # pytest (26 tests) + manual_* live-smoke clients
 Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
+  ⚠️ Dockerfile.mcp COPIES backend/ FILES BY NAME (no rembg/torch bloat from the desktop tree) —
+  a new backend/*.py module MUST be added to that COPY line or the container crash-loops on import.
 ```
 
 ## Hosted service — how it works
