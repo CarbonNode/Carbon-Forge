@@ -1,0 +1,227 @@
+"""Tests for backend/sprite_anim.py — video frames -> locked-style sprite sheet."""
+import io
+import json
+
+import numpy as np
+import pytest
+from PIL import Image, ImageFilter
+
+from backend import sprite_anim as sa
+
+SCRATCH_PAL = np.array([[200, 40, 40], [40, 200, 40], [40, 40, 220],
+                        [240, 220, 60], [30, 30, 30]], np.uint8)
+
+
+def png(rgba):
+    buf = io.BytesIO()
+    Image.fromarray(np.asarray(rgba, dtype=np.uint8), "RGBA").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def load(data):
+    return np.array(Image.open(io.BytesIO(data)).convert("RGBA"))
+
+
+def logical_sprite(seed=1, size=24, pad=4):
+    """A 5-color random sprite on transparent, padded to (size+2*pad)^2."""
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(SCRATCH_PAL), size=(size, size))
+    full = size + 2 * pad
+    spr = np.zeros((full, full, 4), np.uint8)
+    spr[pad:pad + size, pad:pad + size, :3] = SCRATCH_PAL[idx]
+    spr[pad:pad + size, pad:pad + size, 3] = 255
+    return spr
+
+
+def upscale(rgba, factor, blur=0.0):
+    big = np.repeat(np.repeat(rgba, factor, 0), factor, 1)
+    if blur:
+        big = np.array(Image.fromarray(big, "RGBA").filter(ImageFilter.GaussianBlur(blur)))
+    return big
+
+
+def fake_video_frames(spr, n=6, video=480, blur=0.6, noise=6, seed=2):
+    """Simulate an I2V clip: the sprite shifts 0/1/2 px per frame, composited on
+    magenta, resized to the video size with bilinear blur + compression noise."""
+    rng = np.random.default_rng(seed)
+    frames = []
+    for i in range(n):
+        f = np.roll(spr, i % 3, axis=1)
+        fk, _ = sa.composite_on_key(png(upscale(f, 16, blur)))
+        im = Image.open(io.BytesIO(fk)).resize((video, video), Image.BILINEAR)
+        arr = np.array(im).astype(np.int16)
+        arr[..., :3] += rng.integers(-noise, noise + 1, size=arr[..., :3].shape)
+        frames.append(png(np.clip(arr, 0, 255).astype(np.uint8)))
+    return frames
+
+
+# --- timestamps ---------------------------------------------------------------
+
+def test_frame_timestamps_loop_excludes_end():
+    t = sa.frame_timestamps(2.0, 4)
+    assert t == [0.0, 0.5, 1.0, 1.5]
+    t2 = sa.frame_timestamps(2.0, 3, loop=False)
+    assert t2[0] == 0.0 and t2[-1] == pytest.approx(1.98, abs=0.01)  # headroom before the end
+    assert sa.frame_timestamps(2.0, 1) == [0.0]
+    with pytest.raises(ValueError):
+        sa.frame_timestamps(2.0, 4, start_s=1.5, end_s=1.0)
+
+
+# --- reference preparation ---------------------------------------------------
+
+def test_prepare_reference_integer_upscales_and_pads_with_key():
+    spr = logical_sprite(size=24, pad=4)  # 32x32
+    out, info = sa.prepare_reference(png(spr), (512, 512), "#ff00ff")
+    arr = load(out)
+    assert arr.shape == (512, 512, 4) and info["upscale"] == 16
+    assert (arr[..., 3] == 255).all()
+    assert tuple(arr[0, 0, :3]) == (255, 0, 255)  # padded corner = key
+    # nearest-neighbor: a 16x16 block is perfectly flat
+    x0, y0 = info["placed"][0] + 4 * 16, info["placed"][1] + 4 * 16
+    block = arr[y0:y0 + 16, x0:x0 + 16, :3]
+    assert (block == block[0, 0]).all()
+
+
+def test_prepare_reference_shrinks_oversized_source():
+    big = np.zeros((900, 700, 4), np.uint8)
+    big[..., 3] = 255
+    out, info = sa.prepare_reference(png(big), (512, 512))
+    arr = load(out)
+    assert arr.shape[:2] == (512, 512) and info["upscale"] == 1
+    assert info["placed"][3] <= 512 and info["placed"][2] <= 512
+
+
+def test_composite_on_key_and_border_detect():
+    spr = logical_sprite()
+    flat, had = sa.composite_on_key(png(spr), "#00ff00")
+    assert had is True
+    arr = load(flat)
+    assert (arr[..., 3] == 255).all() and tuple(arr[0, 0, :3]) == (0, 255, 0)
+    assert sa.detect_border_color(flat) == "#00ff00"
+    again, had2 = sa.composite_on_key(flat)
+    assert had2 is False
+
+
+# --- style lock ----------------------------------------------------------------
+
+def test_lock_style_carries_reference_grid_onto_frame_size():
+    spr = logical_sprite(size=24, pad=4)              # 32 logical px
+    ai_ref = png(upscale(spr, 16, 0.8))               # 512px "AI" render
+    style = sa.lock_style(ai_ref, (480, 480), max_colors=16)
+    assert style["cell_size"] == 15                   # 480 / 32
+    assert style["logical_size"] == [32, 32]
+    assert style["report"]["grid"]["detected"] is True
+    assert style["palette"] and len(style["palette"]) <= 16
+    # every source color survives the k-means lock
+    got = {tuple(int(c[i:i + 2], 16) for i in (1, 3, 5)) for c in style["palette"]}
+    for col in SCRATCH_PAL:
+        assert any(max(abs(int(a) - int(b)) for a, b in zip(tuple(col), gcol)) <= 8 for gcol in got)
+
+
+def test_lock_style_manual_cell_and_retro_palette():
+    spr = logical_sprite()
+    style = sa.lock_style(png(spr), (512, 512), cell_size=16, palette="gb_pocket")
+    assert style["cell_size"] == 16 and style["logical_size"] == [32, 32]
+    assert style["palette"] == ["#000000", "#545454", "#a8a8a8", "#ffffff"]
+    with pytest.raises(ValueError):
+        sa.lock_style(png(spr), (512, 512), palette="nope")
+
+
+# --- frames ---------------------------------------------------------------------
+
+def test_refine_frame_keys_background_after_sampling():
+    spr = logical_sprite()
+    frames = fake_video_frames(spr, n=1)
+    small = sa.refine_frame(frames[0], 15, key_color="#ff00ff", palette=[sa._hex(c) for c in SCRATCH_PAL])
+    assert small.shape == (32, 32, 4)
+    assert small[0, 0, 3] == 0                        # background keyed
+    assert small[4:28, 4:28, 3].mean() > 250          # sprite body solid
+    # no fringe: every opaque color is one of the palette colors
+    opaque = small[small[..., 3] > 0][:, :3]
+    pal = {tuple(c) for c in SCRATCH_PAL.tolist()}
+    assert all(tuple(c) in pal for c in opaque.tolist())
+
+
+def test_crop_union_is_shared_and_dedupe_drops_repeats():
+    a = np.zeros((10, 10, 4), np.uint8); a[2:4, 2:4] = 255
+    b = np.zeros((10, 10, 4), np.uint8); b[6:8, 6:8] = 255
+    cropped, box = sa.crop_union([a, b])
+    assert box == (2, 2, 8, 8)
+    assert all(f.shape == (6, 6, 4) for f in cropped)
+    kept, idx = sa.dedupe_frames([a, a, b, b, a])
+    assert idx == [0, 2, 4]
+
+
+# --- packing ----------------------------------------------------------------------
+
+def test_pack_sheet_strip_and_grid_atlas():
+    frames = [np.full((8, 6, 4), v, np.uint8) for v in (40, 80, 120, 160, 200)]
+    sheet, atlas = sa.pack_sheet(frames, fps=10, name="run", scale=2)
+    arr = load(sheet)
+    assert arr.shape == (16, 60, 4)
+    assert atlas["meta"]["layout"] == {"columns": 5, "rows": 1, "frame_w": 12, "frame_h": 16,
+                                        "padding": 0, "count": 5, "fps": 10, "logical_frame": [6, 8]}
+    assert atlas["frames"][3]["frame"] == {"x": 36, "y": 0, "w": 12, "h": 16}
+    assert atlas["frames"][0]["duration"] == 100
+    assert atlas["meta"]["frameTags"][0] == {"name": "run", "from": 0, "to": 4, "direction": "forward"}
+    sheet2, atlas2 = sa.pack_sheet(frames, columns=2, padding=1)
+    assert load(sheet2).shape == (3 * 8 + 2, 2 * 6 + 1, 4)
+    assert atlas2["frames"][2]["frame"]["y"] == 9
+    with pytest.raises(ValueError):
+        sa.pack_sheet([frames[0], np.zeros((3, 3, 4), np.uint8)])
+
+
+def test_gif_is_animated_and_transparent():
+    frames = []
+    for i in range(3):
+        f = np.zeros((8, 8, 4), np.uint8)
+        f[i:i + 3, 2:6, :3] = SCRATCH_PAL[i]
+        f[i:i + 3, 2:6, 3] = 255
+        frames.append(f)
+    data = sa.gif_bytes(frames, fps=5, scale=2)
+    im = Image.open(io.BytesIO(data))
+    assert im.format == "GIF" and im.n_frames == 3 and im.size == (16, 16)
+    assert im.info.get("duration") == 200
+    assert "transparency" in im.info
+
+
+# --- end to end -------------------------------------------------------------------
+
+def test_build_animation_end_to_end_locks_style_and_aligns():
+    spr = logical_sprite(size=24, pad=4)
+    ai_ref = png(upscale(spr, 16, 0.8))
+    frames = fake_video_frames(spr, n=6)
+    times = sa.frame_timestamps(3.0, 6)
+    res = sa.build_animation(frames, reference=ai_ref, key_color="#ff00ff", fps=8, scale=3, name="walk",
+                             source_times=times)
+    rep = res["report"]
+    assert rep["cell_size"] == 15 and rep["frames_out"] == 6 and rep["dropped_duplicates"] == 0
+    assert rep["frame_size"] == [26, 24]              # 24 wide + 2px of shift, shared box
+    assert rep["unique_colors"] <= 5                  # never more colors than the sprite
+    assert rep["key_color"] == "#ff00ff"
+    sheet = load(res["sheet"])
+    assert sheet.shape == (24 * 3, 26 * 3 * 6, 4)
+    atlas = json.loads(res["atlas_json"])
+    assert atlas["meta"]["size"] == {"w": 26 * 3 * 6, "h": 24 * 3}
+    assert len(res["frames"]) == 6 and load(res["frames"][0]).shape == (72, 78, 4)
+    assert [f["source_time_s"] for f in atlas["frames"]] == times
+
+
+def test_build_animation_auto_key_and_dedupe_without_reference():
+    spr = logical_sprite()
+    frames = fake_video_frames(spr, n=4, blur=0.0, noise=0)
+    frames = [frames[0], frames[0], frames[1], frames[2]]
+    res = sa.build_animation(frames, key_color="auto", max_colors=8)
+    assert res["report"]["key_color"] == "#ff00ff"
+    assert res["report"]["frames_out"] == 3 and res["report"]["kept_frame_indices"] == [0, 2, 3]
+
+
+def test_pack_existing_aligns_mixed_sizes():
+    a = np.zeros((10, 12, 4), np.uint8); a[1:5, 1:5] = 255
+    b = np.zeros((9, 7, 4), np.uint8); b[3:8, 2:6] = 200
+    res = sa.pack_existing([png(a), png(b)], fps=6, name="mix")
+    # canvas 12x10, bottom-centered: a's box x1..5/y1..5, b's x4..8/y4..9 -> union 7x8
+    assert res["report"]["frame_size"] == [7, 8]
+    assert res["report"]["crop_box"] == [1, 1, 8, 9]
+    assert res["atlas"]["meta"]["layout"]["count"] == 2
+    assert load(res["sheet"]).shape == (8, 14, 4)
