@@ -39,6 +39,8 @@ DEFAULT_KEY_TOLERANCE = 48
 # Default chroma key when a transparent sprite must be composited before I2V.
 DEFAULT_KEY_COLOR = "#FF00FF"
 DEFAULT_MAX_COLORS = 16
+# Sheets are clean stills (no compression fringe) — the pixel_refine default.
+SHEET_KEY_TOLERANCE = 24
 
 
 # ---------------------------------------------------------------------------
@@ -333,6 +335,22 @@ def _layout(n, columns):
     return cols, rows
 
 
+def _frame_tags(tags, n, name):
+    """Aseprite frameTags: a plain string tags the whole animation; a dict
+    {name, from, to[, direction]} tags a frame range (e.g. one row of a
+    4-direction sheet). Ranges are clamped to the packed frames."""
+    out = []
+    for t in (tags or [name]):
+        if isinstance(t, dict):
+            a = max(0, min(n - 1, int(t.get("from", 0))))
+            b = max(a, min(n - 1, int(t.get("to", n - 1))))
+            out.append({"name": str(t.get("name") or name), "from": a, "to": b,
+                        "direction": t.get("direction", "forward")})
+        else:
+            out.append({"name": str(t), "from": 0, "to": n - 1, "direction": "forward"})
+    return out
+
+
 def pack_sheet(frames, *, columns=0, padding=0, scale=1, name="sprite", fps=12,
                tags=None, source_times=None):
     """Pack same-size RGBA frames into a sheet.
@@ -381,8 +399,7 @@ def pack_sheet(frames, *, columns=0, padding=0, scale=1, name="sprite", fps=12,
             "image": f"{name}.png", "format": "RGBA8888",
             "size": {"w": int(sheet_w), "h": int(sheet_h)},
             "scale": str(scale),
-            "frameTags": [{"name": t, "from": 0, "to": n - 1, "direction": "forward"}
-                          for t in (tags or [name])],
+            "frameTags": _frame_tags(tags, n, name),
             "layout": {"columns": cols, "rows": rows, "frame_w": int(ew),
                        "frame_h": int(eh), "padding": padding, "count": n,
                        "fps": int(fps), "logical_frame": [int(fw), int(fh)]},
@@ -528,3 +545,117 @@ def pack_existing(frame_pngs, *, dedupe=False, columns=0, padding=0, scale=1, fp
     }
     return {"sheet": sheet, "atlas": atlas, "atlas_json": json.dumps(atlas, indent=1),
             "gif": gif, "frames": frames_out, "report": report}
+
+
+# ---------------------------------------------------------------------------
+# Sprite SHEETS as input — Retro Diffusion (Astropulse), PixelLab, Aseprite
+# exports, any fixed-cell grid
+# ---------------------------------------------------------------------------
+
+# Retro Diffusion's animation presets return a fixed-cell grid whose ROWS are
+# the four facings, in this order (verified on live output 2026-09-08).
+RD_DIRECTIONS = ("down", "right", "up", "left")
+
+
+def slice_sheet(sheet_png, frame_w, frame_h, *, columns=0, rows=0, drop_empty_tail=True):
+    """Cut a fixed-cell sprite sheet into frames, row-major.
+
+    frame_w/frame_h: the cell size in sheet pixels. columns/rows: 0 = as many
+    as fit (sheet size // cell). Trailing cells with no opaque pixel are
+    dropped (a partial last row); interior empty cells are kept so the grid
+    indices stay meaningful. Returns (frames, columns, rows_used)."""
+    sheet = _load_rgba(sheet_png)
+    H, W = sheet.shape[:2]
+    fw, fh = max(1, int(frame_w)), max(1, int(frame_h))
+    cols = int(columns) if columns and int(columns) > 0 else max(1, W // fw)
+    nrows = int(rows) if rows and int(rows) > 0 else max(1, H // fh)
+    if fw > W or fh > H:
+        raise ValueError(f"frame {fw}x{fh} is larger than the sheet {W}x{H}")
+    frames = []
+    for r in range(nrows):
+        for c in range(cols):
+            y0, x0 = r * fh, c * fw
+            cell = np.zeros((fh, fw, 4), dtype=np.uint8)
+            src = sheet[y0:min(H, y0 + fh), x0:min(W, x0 + fw)]
+            cell[:src.shape[0], :src.shape[1]] = src
+            frames.append(cell)
+    if drop_empty_tail:
+        while len(frames) > 1 and not (frames[-1][..., 3] >= 16).any():
+            frames.pop()
+    rows_used = math.ceil(len(frames) / cols)
+    return frames, cols, rows_used
+
+
+def build_from_sheet(sheet_png, frame_w, frame_h, *, columns=0, rows=0, row_tags=None,
+                     reference=None, max_colors=0, palette=None, palette_colors=None,
+                     key_color=None, key_tolerance=SHEET_KEY_TOLERANCE,
+                     outline="none", outline_color="#000000", margin=0, out_columns=0,
+                     padding=0, scale=1, fps=8, name="sprite", per_row_gifs=True):
+    """A sprite SHEET that is already pixel art -> the same bundle as
+    build_animation, with one Aseprite frameTag per ROW (row_tags, e.g.
+    RD_DIRECTIONS) so engines can play "walk-down" / "walk-left" directly.
+
+    Frames are not resampled (cell size 1) — the sheet's pixels ARE the
+    logical pixels. Optional: key_color keys an opaque background out;
+    palette / palette_colors / max_colors>0 snap every frame to ONE palette
+    (max_colors is k-means over `reference` — the source sprite the sheet was
+    generated from — or over the first frame). Frames are cropped to ONE box
+    shared by every frame of every row, so all directions align in the atlas.
+    out_columns: 0 keeps the source column count (rows stay rows); N repacks.
+    Returns {sheet, atlas, atlas_json, gif, frames, report, row_gifs}."""
+    frames, cols, nrows = slice_sheet(sheet_png, frame_w, frame_h, columns=columns, rows=rows)
+    report = {"source_layout": {"columns": cols, "rows": nrows, "frame_w": int(frame_w),
+                                "frame_h": int(frame_h), "count": len(frames)}}
+    pal_hex = None
+    if key_color == "auto":
+        key_color = detect_border_color(_png_bytes(frames[0]))
+    if palette_colors or palette or (max_colors and int(max_colors) > 0):
+        ref_png = reference if reference is not None else _png_bytes(frames[0])
+        style = lock_style(ref_png, (frame_w, frame_h), cell_size=1, max_colors=max_colors,
+                           palette=palette, palette_colors=palette_colors,
+                           key_color=key_color, key_tolerance=key_tolerance)
+        pal_hex = style["palette"]
+        report["palette"] = style["report"].get("palette")
+    else:
+        report["palette"] = None
+    small = [refine_frame(_png_bytes(f), 1, palette=pal_hex, key_color=key_color,
+                          key_tolerance=key_tolerance) for f in frames]
+    if outline and outline != "none":
+        oc = pa.parse_hex_color(outline_color)
+        small = [pa.add_outline(f, oc, style=outline) for f in small]
+    small, box = crop_union(small, margin=margin)
+    n = len(small)
+    tags = []
+    names = list(row_tags or [])
+    for r in range(nrows):
+        a, b = r * cols, min(n - 1, r * cols + cols - 1)
+        if a > b:
+            break
+        tags.append({"name": names[r] if r < len(names) else f"row{r}", "from": a, "to": b})
+    if nrows == 1 and not names:
+        tags = [name]
+    pack_cols = int(out_columns) if out_columns and int(out_columns) > 0 else cols
+    sheet, atlas = pack_sheet(small, columns=pack_cols, padding=padding, scale=scale,
+                              name=name, fps=fps, tags=tags)
+    gif = gif_bytes(small, fps=fps, scale=scale)
+    row_gifs = {}
+    if per_row_gifs and nrows > 1:
+        for t in tags:
+            if isinstance(t, dict):
+                row_gifs[t["name"]] = gif_bytes(small[t["from"]:t["to"] + 1], fps=fps, scale=scale)
+    frames_out = [_png_bytes(pa.scale_nearest(f, scale) if scale > 1 else f) for f in small]
+    colors = set()
+    for f in small:
+        c, _, _ = pa._unique_weighted_colors(f)
+        colors.update(map(tuple, c.tolist()))
+    report.update({
+        "key_color": key_color, "cell_size": 1, "palette_colors": pal_hex,
+        "frames_in": len(frames), "frames_out": n, "dropped_duplicates": 0,
+        "kept_frame_indices": list(range(n)),
+        "crop_box": list(map(int, box)) if box else None,
+        "frame_size": [int(small[0].shape[1]), int(small[0].shape[0])],
+        "unique_colors": len(colors), "export_scale": max(1, min(32, int(scale))),
+        "tags": [t if isinstance(t, dict) else {"name": t, "from": 0, "to": n - 1} for t in tags],
+    })
+    return {"sheet": sheet, "atlas": atlas, "atlas_json": json.dumps(atlas, indent=1),
+            "gif": gif, "frames": frames_out, "report": report, "row_gifs": row_gifs}

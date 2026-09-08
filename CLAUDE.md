@@ -14,13 +14,6 @@ AI-powered asset generation & refinement. Repo: `CarbonNode/Carbon-Forge`. Two d
 ```
 backend/
   processing.py   # THE engine — pure functions, PipelineOptions, run_pipeline, run_split_pipeline
-  pixel_art.py    # PixelRefiner port (pure NumPy, no models): pixel-grid detection,
-                  #   cell resampling (Oklab medoid), k-means quantization, retro
-                  #   palettes, dithering, outline/trim/scale → `pixel_refine` MCP tool
-  sprite_anim.py  # Sprite ANIMATION engine (pure NumPy, builds on pixel_art): video frames →
-                  #   ONE locked grid + ONE locked palette (from the source sprite) → shared
-                  #   bounding box → dedupe → sprite sheet + Aseprite/Phaser atlas JSON + GIF.
-                  #   → `animate_sprite` / `video_to_sprite_sheet` / `pack_sprite_sheet` tools
   server.py       # Desktop Flask wrapper (port 5123); PyInstaller entry
 forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shadow the pip `mcp` package)
   server.py       # FastMCP assembly: bearer auth on /mcp, /health, /files/<id>/<name>, lifespan
@@ -32,14 +25,7 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
   imaging.py      # Pillow format conversion (image_convert — plain convert/resize, no AI)
   assets3d.py     # GLB helpers: Draco compression (gltf-transform CLI, node in image) + stats
   engine.py       # async bridge to backend.processing (CPU semaphore, model-load lock)
-  tools/          # MCP tool definitions: proc, gen, vid, sprite, audio, extract, util, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, saved characters, audio TTS, batch/montage, generate_clip pipeline)
-                  #   sprite.py = "pixel animation is solved": animate_sprite (sprite → Wan I2V →
-                  #   frames → refine on the sprite's own grid/palette → sheet bundle, one async
-                  #   job), video_to_sprite_sheet (same refine for ANY clip: Veo/Kling/Pixel
-                  #   Engine/screen capture), pack_sprite_sheet (frames you already have). Bundles
-                  #   = <name>.png sheet + <name>.json atlas + <name>.gif + preview.html + frames,
-                  #   one save_bundle id. Refinement is never per-frame-independent — see the
-                  #   module docstring for why (grid/palette/bbox "boil").
+  tools/          # MCP tool definitions: proc, gen, vid, audio, extract, util, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, saved characters, audio TTS, batch/montage, generate_clip pipeline)
                   #   audio.py = generate_speech / list_voices. TWO TTS providers:
                   #   ElevenLabs (cloud) + Chatterbox (local, isolated GPU container, see below)
                   #   util.py = quick conversions: audio_convert / audio_trim / image_convert /
@@ -47,8 +33,6 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
                   #   ('<Project>/.conduit/uploads/<name>'), so they feed straight in
 tests/            # pytest (26 tests) + manual_* live-smoke clients
 Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
-  ⚠️ Dockerfile.mcp COPIES backend/ FILES BY NAME (no rembg/torch bloat from the desktop tree) —
-  a new backend/*.py module MUST be added to that COPY line or the container crash-loops on import.
 ```
 
 ## Hosted service — how it works
@@ -103,24 +87,3 @@ Unchanged by the MCP work: `npm run build-backend` (PyInstaller — picks up `pr
 ## Tests
 
 `python -m pytest tests/ -q` (no network/model downloads). Live smokes: `tests/manual_client.py` (local service), `tests/manual_gateway_e2e.py` (full chain through the gateway, needs GW_AUTH env).
-
-## Sprite animation (`animate_sprite`) — how it is meant to be used
-
-The recipe that makes AI pixel animation usable: draw the sprite ONCE, let Wan 2.2 I2V move it,
-then force every sampled frame back onto the SOURCE sprite's pixel grid and palette
-(`backend/sprite_anim.py`). Per-frame `pixel_refine` is the wrong tool for a clip — each frame
-gets its own grid, palette and bounding box and the result boils.
-
-- **Input sprite:** a transparent PNG is best (`generate_image` on flat magenta → `remove_background`
-  → `pixel_refine`, or any true pixel sprite). `prepare_reference` flattens it on the key color and
-  integer-upscales (nearest) into the 512×512 I2V frame — no resampling blur, no stretching.
-- **Motion prompt:** the tool wraps `motion` in the camera-lock / flat-background / loop scaffold
-  (`SPRITE_MOTION_TEMPLATE`); pass only the action ("walk cycle", "sword slash").
-- **Re-cutting:** the raw I2V mp4 is in the job results — rerun `video_to_sprite_sheet` with other
-  `frames` / `palette` / `fps` without paying the GPU again. `reference_sprite` should be the
-  `-start.png` from the job (or the original sprite) so the lock matches.
-- **Atlas format:** Aseprite JSON-array (`frames[]` + `meta.frameTags` + our `meta.layout`); Phaser
-  `this.load.aseprite(key, sheet, atlas)`, Godot/Unity Aseprite importers read it directly.
-  `columns=0` = one horizontal strip (CSS `steps()` in the bundled `preview.html`).
-- **Tests:** `tests/test_sprite_anim.py` simulates an I2V clip (shift + blur + noise + magenta key)
-  and asserts the lock (cell size, palette, shared box, ≤ source colors).

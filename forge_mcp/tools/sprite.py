@@ -6,11 +6,17 @@ clip → every frame is brought back to TRUE pixel art on ONE locked grid and
 ONE locked palette (backend.sprite_anim) → sprite sheet + Aseprite/Phaser
 atlas JSON + looping GIF + individual frames, delivered as one bundle.
 
-Three entry points, lowest to highest level:
+Four entry points, lowest to highest level:
   pack_sprite_sheet      — frames you already have (PNGs) → sheet/atlas/GIF
+  import_sprite_sheet    — a fixed-cell SHEET you already have (Retro Diffusion,
+                           PixelLab, Aseprite export) → tagged atlas bundle
   video_to_sprite_sheet  — ANY video of a sprite (Wan, Veo, Kling, Pixel Engine,
                            a screen recording…) → refined sheet bundle
-  animate_sprite         — the whole thing as one async job: sprite → I2V → sheet
+  animate_sprite         — the whole thing as one async job: sprite → sheet, with
+                           two engines: local Wan 2.2 I2V (free, any motion, one
+                           facing) or Retro Diffusion "rd-animation" by Astropulse
+                           on Replicate (paid, ~30s, 4-direction walk/idle presets
+                           that come back as TRUE pixel art)
 """
 import asyncio
 import json
@@ -18,7 +24,23 @@ import json
 from backend import pixel_art as pa
 from backend import sprite_anim as sa
 from forge_mcp import generation as g
+from forge_mcp import replicate_api as R
 from forge_mcp import storage, video
+
+# Retro Diffusion's sprite-animation model (Astropulse) as hosted on Replicate.
+# Its presets return a fixed-cell grid PNG: rows = facings (sa.RD_DIRECTIONS),
+# columns = frames. Layouts verified on live output 2026-09-08.
+RD_MODEL = "retro-diffusion/rd-animation"
+RD_STYLES = {
+    "four_angle_walking": {"size": 48, "rows": sa.RD_DIRECTIONS, "fps": 8,
+                           "note": "4 facings x 4 walk frames, humanoids, 48x48"},
+    "walking_and_idle": {"size": 48, "rows": sa.RD_DIRECTIONS, "fps": 8,
+                         "note": "4 facings x (3 walk frames + 1 idle pose), humanoids, 48x48"},
+    "small_sprites": {"size": 32, "rows": sa.RD_DIRECTIONS, "fps": 6,
+                      "note": "4 facings x 5 action poses (idle/walk/attack/hurt/down), 32x32"},
+    "vfx": {"size": None, "rows": None, "fps": 12,
+            "note": "effects (fire, smoke, slash…), 24-96 px, frames in one row"},
+}
 
 # Motion prompt scaffolding for I2V. Wan follows the start frame closely; the
 # words that matter are "static camera", "flat background", "stays centered".
@@ -69,6 +91,9 @@ async def _deliver(res, *, name, project, subpath, cfg, extra=None):
     ]
     for i, fr in enumerate(res["frames"]):
         files.append((f"{name}-{i:02d}.png", fr))
+    row_gifs = res.get("row_gifs") or {}
+    for tag, data in row_gifs.items():
+        files.append((f"{name}-{storage.safe_filename(tag)}.gif", data))
     bundle = await storage.save_bundle(files, project=project, subpath=subpath, cfg=cfg)
     out = {
         "sheet": bundle["files"][f"{name}.png"],
@@ -80,6 +105,10 @@ async def _deliver(res, *, name, project, subpath, cfg, extra=None):
         "report": res["report"],
         "bytes": bundle["bytes"],
     }
+    if row_gifs:
+        out["tags"] = res["report"].get("tags")
+        out["tag_gifs"] = {tag: bundle["files"][f"{name}-{storage.safe_filename(tag)}.gif"]
+                           for tag in row_gifs}
     if "workspace_dir" in bundle:
         out["workspace_dir"] = bundle["workspace_dir"]
     if "workspace_write_error" in bundle:
@@ -223,6 +252,115 @@ def register(mcp, ctx):
                                           padding=padding, scale=scale, fps=fps, name=safe)
         return await _deliver(res, name=safe, project=project, subpath=subpath, cfg=cfg)
 
+    @mcp.tool()
+    async def import_sprite_sheet(
+        sheet: str,
+        frame_w: int,
+        frame_h: int,
+        project: str,
+        columns: int = 0,
+        rows: int = 0,
+        row_tags: list[str] | None = None,
+        reference_sprite: str | None = None,
+        key_color: str | None = None,
+        max_colors: int = 0,
+        palette: str | None = None,
+        palette_colors: list[str] | None = None,
+        outline: str = "none",
+        outline_color: str = "#000000",
+        out_columns: int = 0,
+        padding: int = 0,
+        scale: int = 1,
+        fps: int = 8,
+        name: str = "sprite",
+        subpath: str | None = None,
+    ) -> dict:
+        """Turn a fixed-cell sprite SHEET you already have — a Retro Diffusion / PixelLab
+        download, an Aseprite or Unity export, a sheet from another animate_sprite job —
+        into the standard bundle: repacked sheet PNG + Aseprite/Phaser atlas JSON with ONE
+        frameTag PER ROW + looping GIF (all frames) + one GIF per row + frame PNGs + preview.
+
+        sheet: https URL or '<Project>/<path>'. frame_w/frame_h: the cell size in sheet px
+          (48 for Retro Diffusion walking presets, 32 for small_sprites). columns/rows: 0 =
+          as many cells as fit; trailing empty cells are dropped.
+        row_tags: names for the rows, in order — e.g. ["down","right","up","left"] (Retro
+          Diffusion's facing order) or ["idle","walk","attack"]; default row0, row1…
+        Pixels are kept 1:1 (no resampling). Optional cleanup: key_color '#rrggbb' or 'auto'
+          keys an opaque background out; max_colors>0 (k-means over reference_sprite, else
+          the first frame) / palette / palette_colors snap every frame to ONE palette.
+        Frames are cropped to ONE box shared by every row so all facings align.
+        out_columns: 0 keeps the sheet's row structure; N repacks N per row. scale: integer
+          nearest-neighbor export scale. Returns {sheet, gif, atlas, tags, tag_gifs, frames…}."""
+        _check_palette(palette)
+        src = await storage.resolve_input(sheet, cfg=cfg, kind="image")
+        ref_bytes = (await storage.resolve_input(reference_sprite, cfg=cfg, kind="image")).data \
+            if reference_sprite else None
+        safe = storage.safe_filename(name)
+        res = await asyncio.to_thread(
+            sa.build_from_sheet, src.data, int(frame_w), int(frame_h), columns=columns, rows=rows,
+            row_tags=row_tags, reference=ref_bytes, max_colors=max_colors, palette=palette,
+            palette_colors=palette_colors, key_color=key_color, outline=outline,
+            outline_color=outline_color, out_columns=out_columns, padding=padding, scale=scale,
+            fps=fps, name=safe)
+        return await _deliver(res, name=safe, project=project, subpath=subpath, cfg=cfg)
+
+    async def _run_animate_sprite_rd_job(job_id, src_png, ref_png, prompt, style, size, seed,
+                                         lock_palette, refine_kwargs, name):
+        """Retro Diffusion engine: reference sprite → rd-animation on Replicate → fixed-cell
+        sheet → tagged bundle. One prediction, never retried (a blind retry double-charges)."""
+        try:
+            token = cfg.replicate_api_token
+            job = jobs.get(job_id)
+            spec = RD_STYLES[style]
+            results = []
+            ref_res = await storage.save_result(ref_png, project=job["project"], subpath=job["subpath"],
+                                                filename=f"{name}-reference", ext="png", cfg=cfg)
+            ref_res["kind"] = "reference"
+            results.append(ref_res)
+            jobs.update(job_id, message="uploading reference to Replicate…", results=results)
+            ref_url = await R.upload_file(ctx.http, token, ref_png, f"{name}-reference.png")
+            payload = {"prompt": prompt, "style": style, "width": size, "height": size,
+                       "input_image": ref_url, "return_spritesheet": True}
+            if seed is not None:
+                payload["seed"] = int(seed)
+            pred = await R.create_prediction(ctx.http, token, RD_MODEL, payload, wait=60)
+            jobs.update(job_id, operation_name=pred.get("id"),
+                        message=f"rd-animation {style} on Replicate ({pred.get('status')})…")
+            pred = await R.wait_prediction(ctx.http, token, pred, budget_s=900, poll_s=5)
+            if pred.get("status") != "succeeded":
+                raise g.GenerationError(f"Replicate prediction {pred.get('status')}: "
+                                        f"{pred.get('error') or 'no error detail'}")
+            urls = R.collect_file_urls(pred.get("output"))
+            if not urls:
+                raise g.GenerationError("rd-animation returned no file")
+            sheet_png = await R.download_output(ctx.http, token, urls[0], cfg.max_video_mb * 1024 * 1024)
+            raw = await storage.save_result(sheet_png, project=job["project"], subpath=job["subpath"],
+                                            filename=f"{name}-rd-sheet", ext="png", cfg=cfg)
+            raw["kind"] = "rd_sheet"; raw["engine"] = f"{RD_MODEL} {style}"
+            raw["prediction_id"] = pred.get("id"); raw["frame_size"] = [size, size]
+            metrics = pred.get("metrics") or {}
+            if metrics.get("predict_time"):
+                raw["predict_time_s"] = round(metrics["predict_time"], 2)
+            results.append(raw)
+            jobs.update(job_id, message="slicing sheet + packing atlas…", results=results)
+            res = await asyncio.to_thread(
+                sa.build_from_sheet, sheet_png, size, size, row_tags=spec["rows"],
+                reference=src_png if lock_palette else None,
+                max_colors=refine_kwargs["max_colors"] if lock_palette else 0,
+                palette=refine_kwargs["palette"], palette_colors=refine_kwargs["palette_colors"],
+                outline=refine_kwargs["outline"], outline_color=refine_kwargs["outline_color"],
+                out_columns=refine_kwargs["columns"], padding=refine_kwargs["padding"],
+                scale=refine_kwargs["scale"], fps=refine_kwargs["fps"], name=name)
+            sheet = await _deliver(res, name=name, project=job["project"], subpath=job["subpath"], cfg=cfg,
+                                   extra={"kind": "animation", "engine": f"{RD_MODEL} {style}"})
+            results.append(sheet)
+            rep = res["report"]
+            jobs.update(job_id, status="done", results=results,
+                        message=f"complete: {rep['frames_out']} frames @ {rep['frame_size'][0]}x"
+                                f"{rep['frame_size'][1]}, {len(rep['tags'])} tags ({RD_MODEL} {style})")
+        except Exception as e:
+            jobs.update(job_id, status="failed", error=str(e))
+
     async def _run_animate_sprite_job(job_id, start_png, prep_info, motion, neg, w, h, length, steps, seed,
                                       fps_video, refine_kwargs, name):
         try:
@@ -270,6 +408,11 @@ def register(mcp, ctx):
         image: str,
         project: str,
         motion: str = "walk cycle, walking in place",
+        engine: str = "wan",
+        style: str = "four_angle_walking",
+        subject: str | None = None,
+        size: int = 0,
+        lock_palette: bool = False,
         frames: int = 8,
         seconds: float = 2.0,
         fps: int = 12,
@@ -291,12 +434,25 @@ def register(mcp, ctx):
         name: str | None = None,
         subpath: str | None = None,
     ) -> dict:
-        """Animate ONE pixel sprite into a game-ready animation, end to end, LOCALLY and FREE:
-        sprite → Wan 2.2 I2V video → evenly sampled frames → every frame refined back to TRUE
-        pixel art on the sprite's own grid + palette → sprite sheet PNG + Aseprite/Phaser
-        atlas JSON + looping GIF + frame PNGs + HTML preview. Returns a job_id immediately;
-        poll job_status (a few minutes). The finished job's results hold the prepared start
-        frame, the raw I2V video, and the animation bundle (sheet/gif/atlas/preview/frames).
+        """Animate ONE pixel sprite into a game-ready animation, end to end: sprite sheet PNG
+        + Aseprite/Phaser atlas JSON + looping GIF + frame PNGs + HTML preview, one async job.
+        Returns a job_id immediately; poll job_status. Two engines:
+
+        engine 'wan' (default, LOCAL and FREE, a few minutes): sprite → Wan 2.2 I2V video →
+          evenly sampled frames → every frame refined back to TRUE pixel art on the sprite's
+          own grid + palette. Any `motion` you can describe, ONE facing (the sprite's).
+          Results: prepared start frame, raw I2V video, bundle.
+        engine 'retro-diffusion' (Astropulse's rd-animation on Replicate, ~$0.07-0.25 and
+          ~30 s): the sprite is the REFERENCE for a 4-direction preset that comes back as
+          true pixel art already — `style` 'four_angle_walking' (4 facings x 4 walk frames,
+          48x48), 'walking_and_idle' (4 facings x 3 walk + 1 idle, 48x48), 'small_sprites'
+          (4 facings x 5 action poses, 32x32) or 'vfx' (effects, `size` 24-96, one row).
+          The model re-draws the character in its own style at that size (a rendition, not
+          your exact pixels); rows are tagged down/right/up/left in the atlas and each facing
+          also gets its own GIF (tag_gifs). `subject` is the text prompt ("armored knight with
+          sword and shield"; defaults to `motion`). lock_palette=true snaps the result to THIS
+          sprite's palette (max_colors/palette/palette_colors) so it matches your other
+          assets. Results: reference, raw rd sheet, bundle. Nothing else below applies.
 
         image: the sprite — https URL or '<Project>/<path>'. Transparent PNGs are ideal
           (a generate_image/generate_local pixel sprite after remove_background, or a
@@ -318,6 +474,34 @@ def register(mcp, ctx):
         _check_palette(palette)
         src = await storage.resolve_input(image, cfg=cfg, kind="image")
         storage.validate_project(project, cfg=cfg)
+        refine_common = dict(key_color=key_color, key_tolerance=key_tolerance, max_colors=max_colors,
+                             palette=palette, palette_colors=palette_colors, cell_size=cell_size,
+                             outline=outline, outline_color=outline_color, dedupe=dedupe, columns=columns,
+                             padding=padding, scale=scale, fps=fps)
+        engine = (engine or "wan").strip().lower().replace("_", "-")
+        if engine in ("retro-diffusion", "rd", "astro", "retrodiffusion"):
+            if not cfg.replicate_api_token:
+                return {"error": "REPLICATE_API_TOKEN is not configured on the forge service "
+                                 "(engine 'retro-diffusion' runs on Replicate)"}
+            if style not in RD_STYLES:
+                return {"error": f"style must be one of {', '.join(RD_STYLES)}"}
+            spec = RD_STYLES[style]
+            rd_size = spec["size"] or max(24, min(96, int(size) or 64))
+            prompt = (subject or motion or "").strip() or "pixel art game sprite"
+            # The model wants an opaque RGB reference: flatten on white (its own background
+            # color), integer-upscaled so small sprites read clearly.
+            ref_png, prep_info = await asyncio.to_thread(sa.prepare_reference, src.data, (256, 256), "#FFFFFF")
+            safe = storage.safe_filename(name or f"{prompt[:24]}-{style}")
+            job = jobs.create(kind="animate-sprite", model=f"{RD_MODEL} {style}", prompt=prompt,
+                              project=project, subpath=subpath, filename=safe)
+            asyncio.create_task(_run_animate_sprite_rd_job(job["id"], src.data, ref_png, prompt, style,
+                                                           rd_size, seed, lock_palette, refine_common, safe))
+            return {"job_id": job["id"], "status": "running", "engine": f"{RD_MODEL} {style}",
+                    "prompt": prompt, "prepare": prep_info, "layout": spec["note"],
+                    "note": "Retro Diffusion on Replicate takes ~30-60 s. Poll with job_status; the "
+                            "animation bundle is the last entry in results (tags + tag_gifs per facing)."}
+        if engine != "wan":
+            return {"error": "engine must be 'wan' (local I2V) or 'retro-diffusion'"}
         w, h = g.VIDEO_AR["1:1"]
         start_png, prep_info = await asyncio.to_thread(sa.prepare_reference, src.data, (w, h), key_color)
         fps_video = g.LOCAL_VIDEO_MODELS["wan-i2v"]["fps"]
@@ -329,10 +513,7 @@ def register(mcp, ctx):
         job = jobs.create(kind="animate-sprite", model="wan-i2v", prompt=prompt, project=project,
                           subpath=subpath, filename=safe)
         refine_kwargs = dict(frames=max(1, min(32, int(frames))), start=None, end=None, loop=True,
-                             key_color=key_color, key_tolerance=key_tolerance, max_colors=max_colors,
-                             palette=palette, palette_colors=palette_colors, cell_size=cell_size,
-                             outline=outline, outline_color=outline_color, dedupe=dedupe, columns=columns,
-                             padding=padding, scale=scale, fps=fps)
+                             **refine_common)
         asyncio.create_task(_run_animate_sprite_job(job["id"], start_png, prep_info, prompt, neg, w, h,
                                                     length, steps, seed, fps_video, refine_kwargs, safe))
         return {"job_id": job["id"], "status": "running", "prepare": prep_info,

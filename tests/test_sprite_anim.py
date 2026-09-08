@@ -225,3 +225,69 @@ def test_pack_existing_aligns_mixed_sizes():
     assert res["report"]["crop_box"] == [1, 1, 8, 9]
     assert res["atlas"]["meta"]["layout"]["count"] == 2
     assert load(res["sheet"]).shape == (8, 14, 4)
+
+
+# --- sheets as input (Retro Diffusion / PixelLab / Aseprite exports) ----------
+
+def four_dir_sheet(cell=16, cols=4, rows=4):
+    """A cols x rows grid of `cell` px cells; each cell holds a distinct
+    5-color blob whose position differs per row so the shared crop matters."""
+    rng = np.random.default_rng(5)
+    sheet = np.zeros((rows * cell, cols * cell, 4), np.uint8)
+    for r in range(rows):
+        for c in range(cols):
+            idx = rng.integers(0, len(SCRATCH_PAL), size=(6, 6))
+            y0, x0 = r * cell + 2 + r, c * cell + 3 + c  # drifts per row/col
+            sheet[y0:y0 + 6, x0:x0 + 6, :3] = SCRATCH_PAL[idx]
+            sheet[y0:y0 + 6, x0:x0 + 6, 3] = 255
+    return sheet
+
+
+def test_slice_sheet_row_major_and_drops_empty_tail():
+    sheet = four_dir_sheet()
+    sheet[48:, 32:] = 0  # last row: only 2 of 4 cells drawn
+    frames, cols, rows = sa.slice_sheet(png(sheet), 16, 16)
+    assert (cols, rows) == (4, 4)
+    assert len(frames) == 14  # two trailing empty cells dropped
+    assert frames[0].shape == (16, 16, 4)
+    assert (frames[5] == sheet[16:32, 16:32]).all()  # row 1, col 1
+
+
+def test_frame_tags_accept_ranges_and_clamp():
+    tags = sa._frame_tags([{"name": "down", "from": 0, "to": 3},
+                           {"name": "left", "from": 12, "to": 99}, "all"], 16, "x")
+    assert tags[0] == {"name": "down", "from": 0, "to": 3, "direction": "forward"}
+    assert tags[1]["to"] == 15
+    assert tags[2] == {"name": "all", "from": 0, "to": 15, "direction": "forward"}
+
+
+def test_build_from_sheet_tags_rows_and_shares_one_box():
+    sheet = four_dir_sheet()
+    res = sa.build_from_sheet(png(sheet), 16, 16, row_tags=sa.RD_DIRECTIONS, name="k", fps=8)
+    rep, atlas = res["report"], res["atlas"]
+    assert rep["source_layout"] == {"columns": 4, "rows": 4, "frame_w": 16, "frame_h": 16, "count": 16}
+    names = [t["name"] for t in atlas["meta"]["frameTags"]]
+    assert names == ["down", "right", "up", "left"]
+    assert atlas["meta"]["frameTags"][2] == {"name": "up", "from": 8, "to": 11, "direction": "forward"}
+    # one shared crop: the blobs drift 3px across rows/cols -> box spans the drift + 6px
+    assert rep["frame_size"] == [9, 9]
+    assert atlas["meta"]["layout"]["columns"] == 4 and atlas["meta"]["layout"]["rows"] == 4
+    assert set(res["row_gifs"]) == {"down", "right", "up", "left"}
+    assert Image.open(io.BytesIO(res["row_gifs"]["left"])).n_frames == 4
+    assert Image.open(io.BytesIO(res["gif"])).n_frames == 16
+    assert rep["unique_colors"] <= len(SCRATCH_PAL)
+    # frames are kept 1:1 — no resampling
+    assert (load(res["frames"][0])[..., 3] == 255).sum() == 36
+
+
+def test_build_from_sheet_palette_lock_and_key():
+    sheet = four_dir_sheet()
+    opaque = sheet.copy()
+    opaque[..., :3][opaque[..., 3] == 0] = (255, 0, 255)
+    opaque[..., 3] = 255
+    res = sa.build_from_sheet(png(opaque), 16, 16, key_color="#FF00FF", max_colors=3,
+                              row_tags=sa.RD_DIRECTIONS)
+    assert res["report"]["key_color"] == "#FF00FF"
+    assert len(res["report"]["palette_colors"]) == 3
+    assert res["report"]["unique_colors"] <= 3
+    assert (load(res["frames"][0])[..., 3] == 0).any()  # background keyed out
