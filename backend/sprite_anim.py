@@ -132,6 +132,47 @@ def prepare_reference(data, size, key_color=DEFAULT_KEY_COLOR):
     return _png_bytes(canvas), info
 
 
+def prepare_native_frame(data, min_size, max_size, pad_to_multiple=1):
+    """The exact frame an API that animates YOUR sprite should receive: the
+    sprite at its logical size (a true pixel grid is collapsed to 1 px per
+    logical pixel), integer-upscaled (nearest) if smaller than `min_size`,
+    LANCZOS-fitted only if larger than `max_size`, on a transparent canvas
+    whose sides are at least min_size. Returns (png_bytes, (w, h), info)."""
+    rgba = _load_rgba(data)
+    info = {"source_size": [int(rgba.shape[1]), int(rgba.shape[0])]}
+    g = pa.detect_grid(rgba)
+    if g["detected"] and (g["cell_w"] > 1 or g["cell_h"] > 1):
+        small = pa.sample_cells(rgba, g)
+        if pa._reconstruction_error(rgba, g, small) <= pa.RECON_MAX_ERROR:
+            rgba = small
+            info["grid"] = {"cell": [int(g["cell_w"]), int(g["cell_h"])],
+                            "logical_size": [int(rgba.shape[1]), int(rgba.shape[0])]}
+    rgba, box = crop_union([rgba])
+    rgba = rgba[0]
+    h, w = rgba.shape[:2]
+    factor = 1
+    while max(w, h) * (factor + 1) <= max_size and min(w, h) * factor < min_size:
+        factor += 1
+    if factor > 1:
+        rgba = pa.scale_nearest(rgba, factor)
+        h, w = rgba.shape[:2]
+    if max(w, h) > max_size:
+        img = Image.fromarray(rgba, "RGBA")
+        img.thumbnail((max_size, max_size), Image.LANCZOS)
+        rgba = np.array(img, dtype=np.uint8)
+        h, w = rgba.shape[:2]
+        info["fitted"] = True
+    W, H = max(w, min_size), max(h, min_size)
+    m = max(1, int(pad_to_multiple))
+    W, H = -(-W // m) * m, -(-H // m) * m
+    canvas = np.zeros((H, W, 4), dtype=np.uint8)
+    x0, y0 = (W - w) // 2, H - h  # feet on the floor, centered
+    canvas[y0:y0 + h, x0:x0 + w] = rgba
+    info.update({"upscale": factor, "placed": [int(x0), int(y0), int(w), int(h)],
+                 "frame_size": [int(W), int(H)]})
+    return _png_bytes(canvas), (int(W), int(H)), info
+
+
 def composite_on_key(data, key_color=DEFAULT_KEY_COLOR):
     """Flatten a transparent sprite onto a solid chroma key so a video model
     gets an opaque start frame that can be keyed back out. Returns (png_bytes,

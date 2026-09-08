@@ -25,6 +25,7 @@ from backend import pixel_art as pa
 from backend import sprite_anim as sa
 from forge_mcp import generation as g
 from forge_mcp import replicate_api as R
+from forge_mcp import retrodiffusion_api as RD
 from forge_mcp import storage, video
 
 # Retro Diffusion's sprite-animation model (Astropulse) as hosted on Replicate.
@@ -361,6 +362,56 @@ def register(mcp, ctx):
         except Exception as e:
             jobs.update(job_id, status="failed", error=str(e))
 
+    async def _run_animate_sprite_rd_advanced_job(job_id, src_png, frame_png, size, prompt, action, frames, seed,
+                                                  lock_palette, refine_kwargs, name):
+        """Retro Diffusion OFFICIAL API, advanced animation: YOUR frame, animated at its native
+        size → one-row strip → bundle. One submit, never retried (it bills the balance)."""
+        try:
+            key = cfg.rd_api_key
+            job = jobs.get(job_id)
+            w, h = size
+            results = []
+            ref_res = await storage.save_result(frame_png, project=job["project"], subpath=job["subpath"],
+                                                filename=f"{name}-frame", ext="png", cfg=cfg)
+            ref_res["kind"] = "reference"; ref_res["note"] = "the exact frame Retro Diffusion animated"
+            results.append(ref_res)
+            payload = RD.advanced_payload(prompt, action, frame_png, w, h, frames=frames, seed=seed,
+                                          spritesheet=True)
+            jobs.update(job_id, message=f"submitting rd_advanced_animation__{action} ({w}x{h}, "
+                                        f"{payload['frames_duration']} frames)…", results=results)
+            submitted = await RD.submit(ctx.http, key, payload)
+            jobs.update(job_id, operation_name=submitted.get("task_id"),
+                        message=f"Retro Diffusion task {submitted.get('status')}…")
+            result = await RD.wait_task(ctx.http, key, submitted, budget_s=900, poll_s=3,
+                                        on_status=lambda st: jobs.update(job_id, message=f"Retro Diffusion: {st}…"))
+            strip_png = await RD.first_image(ctx.http, key, result)
+            raw = await storage.save_result(strip_png, project=job["project"], subpath=job["subpath"],
+                                            filename=f"{name}-rd-strip", ext="png", cfg=cfg)
+            raw["kind"] = "rd_sheet"; raw["engine"] = f"retrodiffusion.ai rd_advanced_animation__{action}"
+            raw["task_id"] = submitted.get("task_id"); raw["frame_size"] = [w, h]
+            for k in ("balance_cost", "remaining_balance", "model"):
+                if result.get(k) is not None:
+                    raw[k] = result[k]
+            results.append(raw)
+            jobs.update(job_id, message="slicing strip + packing atlas…", results=results)
+            res = await asyncio.to_thread(
+                sa.build_from_sheet, strip_png, w, h, row_tags=[action],
+                reference=src_png if lock_palette else None,
+                max_colors=refine_kwargs["max_colors"] if lock_palette else 0,
+                palette=refine_kwargs["palette"], palette_colors=refine_kwargs["palette_colors"],
+                outline=refine_kwargs["outline"], outline_color=refine_kwargs["outline_color"],
+                out_columns=refine_kwargs["columns"], padding=refine_kwargs["padding"],
+                scale=refine_kwargs["scale"], fps=refine_kwargs["fps"], name=name)
+            sheet = await _deliver(res, name=name, project=job["project"], subpath=job["subpath"], cfg=cfg,
+                                   extra={"kind": "animation", "engine": raw["engine"]})
+            results.append(sheet)
+            rep = res["report"]
+            jobs.update(job_id, status="done", results=results,
+                        message=f"complete: {rep['frames_out']} frames @ {rep['frame_size'][0]}x"
+                                f"{rep['frame_size'][1]} ({raw['engine']})")
+        except Exception as e:
+            jobs.update(job_id, status="failed", error=str(e))
+
     async def _run_animate_sprite_job(job_id, start_png, prep_info, motion, neg, w, h, length, steps, seed,
                                       fps_video, refine_kwargs, name):
         try:
@@ -410,6 +461,7 @@ def register(mcp, ctx):
         motion: str = "walk cycle, walking in place",
         engine: str = "wan",
         style: str = "four_angle_walking",
+        action: str | None = None,
         subject: str | None = None,
         size: int = 0,
         lock_palette: bool = False,
@@ -453,6 +505,12 @@ def register(mcp, ctx):
           sword and shield"; defaults to `motion`). lock_palette=true snaps the result to THIS
           sprite's palette (max_colors/palette/palette_colors) so it matches your other
           assets. Results: reference, raw rd sheet, bundle. Nothing else below applies.
+          `action` (needs RETRO_DIFFUSION_API_KEY on the service — the official API, not
+          Replicate) animates YOUR EXACT frame instead of re-drawing it: 'walking' | 'idle' |
+          'jump' | 'crouch' | 'attack' | 'destroy' | 'custom_action' | 'subtle_motion'
+          (~$0.14, custom/subtle $0.25), sprite kept at its native 32-256 px size (tiny
+          sprites are integer-upscaled to 32), `frames` snapped to 4/6/8/10/12/16, `motion`
+          as the motion text ("slow, heavy steps"), one row tagged with the action.
 
         image: the sprite — https URL or '<Project>/<path>'. Transparent PNGs are ideal
           (a generate_image/generate_local pixel sprite after remove_background, or a
@@ -483,6 +541,29 @@ def register(mcp, ctx):
             if not cfg.replicate_api_token:
                 return {"error": "REPLICATE_API_TOKEN is not configured on the forge service "
                                  "(engine 'retro-diffusion' runs on Replicate)"}
+            if action:
+                action = action.strip().lower().replace("-", "_").replace(" ", "_")
+                if action not in RD.ADVANCED_ACTIONS:
+                    return {"error": f"action must be one of {', '.join(RD.ADVANCED_ACTIONS)}"}
+                if not cfg.rd_api_key:
+                    return {"error": "action=… needs the official Retro Diffusion API: set "
+                                     "RETRO_DIFFUSION_API_KEY on the forge service (retrodiffusion.ai). "
+                                     "Without it use style=… (Replicate presets) or engine 'wan'."}
+                frame_png, (w, h), prep_info = await asyncio.to_thread(sa.prepare_native_frame, src.data,
+                                                                       RD.MIN_SIZE, RD.MAX_SIZE)
+                prompt = (motion or "").strip() or action.replace("_", " ")
+                safe = storage.safe_filename(name or f"{(subject or action)[:24]}-{action}")
+                job = jobs.create(kind="animate-sprite", model=f"rd_advanced_animation__{action}", prompt=prompt,
+                                  project=project, subpath=subpath, filename=safe)
+                asyncio.create_task(_run_animate_sprite_rd_advanced_job(
+                    job["id"], src.data, frame_png, (w, h), prompt, action, frames, seed, lock_palette,
+                    refine_common, safe))
+                return {"job_id": job["id"], "status": "running",
+                        "engine": f"retrodiffusion.ai rd_advanced_animation__{action}", "prompt": prompt,
+                        "frame_size": [w, h], "frames": RD.snap_frames(frames), "prepare": prep_info,
+                        "cost_usd": RD.ADVANCED_ACTIONS[action],
+                        "note": "Official Retro Diffusion API (async task, ~30-90 s). Poll job_status; the "
+                                "bundle is the last entry in results."}
             if style not in RD_STYLES:
                 return {"error": f"style must be one of {', '.join(RD_STYLES)}"}
             spec = RD_STYLES[style]

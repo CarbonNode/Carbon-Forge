@@ -291,3 +291,38 @@ def test_build_from_sheet_palette_lock_and_key():
     assert len(res["report"]["palette_colors"]) == 3
     assert res["report"]["unique_colors"] <= 3
     assert (load(res["frames"][0])[..., 3] == 0).any()  # background keyed out
+
+
+# --- native frame for "animate YOUR sprite" APIs ---------------------------------
+
+def test_prepare_native_frame_collapses_grid_and_upscales_to_min():
+    spr = logical_sprite(size=20, pad=2)            # 24x24 logical, 20x20 opaque
+    big = upscale(spr, 8)                           # 192x192 fake-upscaled pixel art
+    png_bytes, (w, h), info = sa.prepare_native_frame(png(big), 32, 256)
+    assert info["grid"]["cell"] == [8, 8]
+    assert (w, h) == (40, 40)                        # 20 logical px x2 = 40 >= 32
+    assert info["upscale"] == 2
+    arr = load(png_bytes)
+    assert arr.shape[:2] == (40, 40)
+    assert (arr[..., 3] == 255).sum() == 20 * 20 * 4
+    assert arr[-1, :, 3].any()                       # feet on the floor
+
+
+def test_prepare_native_frame_fits_oversized_and_pads_to_multiple():
+    spr = logical_sprite(size=300, pad=0)
+    png_bytes, (w, h), info = sa.prepare_native_frame(png(spr), 32, 256, pad_to_multiple=8)
+    assert max(w, h) == 256 and info.get("fitted")
+    assert w % 8 == 0 and h % 8 == 0
+
+
+def test_rd_snap_frames_and_payload():
+    from forge_mcp import retrodiffusion_api as RD
+    assert [RD.snap_frames(n) for n in (1, 5, 7, 9, 11, 14, 99)] == [4, 4, 6, 8, 10, 12, 16]
+    body = RD.advanced_payload("slow steps", "walking", b"\x89PNG", 64, 64, frames=7, seed=3)
+    assert body["prompt_style"] == "rd_advanced_animation__walking"
+    assert body["frames_duration"] == 6 and body["num_images"] == 1 and body["return_spritesheet"] is True
+    assert body["input_image"] == "iVBORw=="
+    with pytest.raises(Exception):
+        RD.advanced_payload("x", "fly", b"", 64, 64)
+    with pytest.raises(Exception):
+        RD.advanced_payload("x", "idle", b"", 20, 20)
