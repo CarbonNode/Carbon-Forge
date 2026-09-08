@@ -203,13 +203,41 @@ def _gradient_profile(rgba, axis):
     return (d * wgt).sum(axis=1), wgt.sum(axis=1)
 
 
+def _period_evidence(profile, length, period):
+    """(offset, evidence) of one boundary period along an axis. `period` may be
+    FRACTIONAL: boundary positions are folded by phase into round(period)
+    bins, so a 10.24 px cell (a 100-px sprite drawn into 1024 px) scores as
+    one period instead of smearing across 10 and 11."""
+    g, wprof = profile
+    total_g, total_w = g.sum(), wprof.sum()
+    if total_g <= 0 or total_w <= 0 or length < 4:
+        return 0, 0.0
+    overall = total_g / total_w
+    positions = np.arange(1, length)  # g index i == boundary at position i+1
+    if float(period).is_integer():
+        s = int(period)
+        residues = positions % s
+    else:
+        s = max(2, int(round(period)))
+        residues = np.floor(((positions % period) / period) * s).astype(np.int64) % s
+    folded_g = np.bincount(residues, weights=g, minlength=s)
+    folded_w = np.bincount(residues, weights=wprof, minlength=s)
+    means = np.where(folded_w > 0, folded_g / np.maximum(folded_w, 1e-12), 0.0)
+    # shrink by the number of boundary lines backing each offset — a coarse
+    # period has few lines and many offsets to cherry-pick from, which
+    # otherwise inflates its max-over-offsets evidence past the true period
+    counts = np.bincount(residues, minlength=s)
+    shrunk = means * np.sqrt(counts / (counts + 8))
+    off = int(np.argmax(shrunk))
+    return off, float(shrunk[off] / overall)
+
+
 def _detect_axis(profile, length, max_cells):
     """Best (cell_size, offset, evidence) along one axis, or None."""
     g, wprof = profile
     total_g, total_w = g.sum(), wprof.sum()
     if total_g <= 0 or total_w <= 0 or length < 4:
         return None
-    overall = total_g / total_w
     min_cell = max(2, int(np.ceil(length / max(2, max_cells))))
     # need >= 6 cells of periodic evidence — pixel art has many cells per axis;
     # a 3-4 "cell" fit is content structure, not a pixel grid
@@ -217,22 +245,8 @@ def _detect_axis(profile, length, max_cells):
     if max_cell < min_cell:
         return None
 
-    # g index i == boundary between i and i+1, i.e. position i+1
-    positions = np.arange(1, length)
-
     def evidence(s):
-        residues = positions % s
-        folded_g = np.bincount(residues, weights=g, minlength=s)
-        folded_w = np.bincount(residues, weights=wprof, minlength=s)
-        means = np.where(folded_w > 0, folded_g / np.maximum(folded_w, 1e-12),
-                         0.0)
-        # shrink by the number of boundary lines backing each offset — a coarse
-        # period has few lines and many offsets to cherry-pick from, which
-        # otherwise inflates its max-over-offsets evidence past the true period
-        counts = np.bincount(residues, minlength=s)
-        shrunk = means * np.sqrt(counts / (counts + 8))
-        off = int(np.argmax(shrunk))
-        return off, float(shrunk[off] / overall)
+        return _period_evidence(profile, length, s)
 
     best = None
     for s in range(min_cell, max_cell + 1):
@@ -286,6 +300,138 @@ def detect_grid(rgba, max_cells_w=AUTO_MAX_CELLS, max_cells_h=AUTO_MAX_CELLS):
         "score": round((est_x[2] + est_y[2]) / 2, 3),
         "detected": True,
     }
+
+
+def _fractional_base(rgba, grid, max_k=16, min_cell=3.0):
+    """AI image models draw an N x N logical sprite into a fixed canvas, so the
+    cell is often FRACTIONAL (1024 / 100 = 10.24 px). Integer detection then
+    locks onto a coarse near-multiple (41 ≈ 4 x 10.24) and merges real pixels.
+    Test whether the detected integer period is k x a fractional base that
+    scores at least as well on both axes; return that base (or None)."""
+    h, w = rgba.shape[:2]
+    px, py = _gradient_profile(rgba, 1), _gradient_profile(rgba, 0)
+    cx, cy = grid["cell_w"], grid["cell_h"]
+    _, ev_x = _period_evidence(px, w, cx)
+    _, ev_y = _period_evidence(py, h, cy)
+    base_ev = (ev_x + ev_y) / 2
+    best = None
+    for P in {cx, cy}:
+        for k in range(2, max_k + 1):
+            f = P / k
+            if f < min_cell:
+                break
+            if abs(f - round(f)) < 0.08:
+                continue  # an integer divisor — the harmonic rule handles it
+            _, fx = _period_evidence(px, w, f)
+            _, fy = _period_evidence(py, h, f)
+            ev = (fx + fy) / 2
+            if ev >= max(MIN_GRID_EVIDENCE, base_ev * HARMONIC_EVIDENCE_RATIO) and (
+                    best is None or ev > best[1]):
+                best = (f, ev)
+    return best
+
+
+def normalize_fractional_grid(rgba, grid):
+    """If the detected grid is a coarse multiple of a fractional cell, resample
+    the image so that cell becomes an exact integer (a 1024 px / 10.24 px
+    sprite becomes 1000 px / 10 px) and re-detect. Returns (rgba, grid, note)."""
+    found = _fractional_base(rgba, grid)
+    if not found:
+        return rgba, grid, None
+    f, ev = found
+    h, w = rgba.shape[:2]
+    c = max(2, int(round(f)))
+    W, H = max(c, int(round(w / f)) * c), max(c, int(round(h / f)) * c)
+    img = Image.fromarray(np.asarray(rgba, dtype=np.uint8), "RGBA").resize((W, H), Image.LANCZOS)
+    out = np.array(img, dtype=np.uint8)
+    g2 = detect_grid(out)
+    if not g2["detected"] or max(g2["cell_w"], g2["cell_h"]) > c * 1.5:
+        # re-detection disagreed — trust the base directly
+        g2 = {"cell_w": c, "cell_h": c, "offset_x": 0, "offset_y": 0,
+              "out_w": W // c, "out_h": H // c, "score": round(ev, 3), "detected": True}
+    note = {"fractional_cell": round(f, 3), "evidence": round(ev, 3),
+            "resampled_to": [W, H], "cell": c}
+    return out, g2, note
+
+
+def rescue_harmonic(rgba, grid):
+    """A detected cell that cannot reproduce the source may be a HARMONIC of the
+    true cell (a sparse sheet's sprite pitch out-scores its 4 px grid). Walk the
+    integer divisors of the detected cell, coarsest first, and return the first
+    that reproduces the source AND is itself a periodic boundary on both axes.
+    Returns (grid, small, recon) or None."""
+    h, w = rgba.shape[:2]
+    px, py = _gradient_profile(rgba, 1), _gradient_profile(rgba, 0)
+    cell = int(min(grid["cell_w"], grid["cell_h"]))
+    for d in range(cell // 2, 1, -1):
+        if cell % d:
+            continue
+        off_x, ev_x = _period_evidence(px, w, d)
+        off_y, ev_y = _period_evidence(py, h, d)
+        if min(ev_x, ev_y) < MIN_GRID_EVIDENCE:
+            continue
+        g = {"cell_w": d, "cell_h": d, "offset_x": off_x % d, "offset_y": off_y % d,
+             "out_w": max(1, (w - off_x % d) // d), "out_h": max(1, (h - off_y % d) // d),
+             "score": round((ev_x + ev_y) / 2, 3), "detected": True}
+        small = sample_cells(rgba, g)
+        recon = _reconstruction_error(rgba, g, small)
+        if recon <= RECON_MAX_ERROR / 2:
+            return g, small, recon
+    return None
+
+
+def resolve_grid(rgba, max_cells=AUTO_MAX_CELLS, sampling="medoid"):
+    """The whole auto-grid decision in one place (shared by pixel_refine,
+    sprite lock_style and prepare_native_frame): detect → normalize a
+    fractional cell → sample → reconstruction gate → harmonic rescue → else
+    1:1. Returns (rgba, grid, small, report) where rgba may have been
+    resampled (fractional cell) and small is the logical-resolution image."""
+    rgba = np.asarray(rgba, dtype=np.uint8)
+    g = detect_grid(rgba, max_cells_w=max_cells, max_cells_h=max_cells)
+    report = {**g, "mode": "auto"}
+    if not g["detected"] or (g["cell_w"] <= 1 and g["cell_h"] <= 1):
+        return rgba, g, rgba.copy(), report
+    rgba, g, note = normalize_fractional_grid(rgba, g)
+    if note:
+        report.update(g)
+        report["fractional"] = note
+    small = sample_cells(rgba, g, mode=sampling)
+    recon = _reconstruction_error(rgba, g, small)
+    # Pixel cells are square. When one axis locked onto a harmonic of the
+    # other (8 x 24), the finer square grid wins if it reproduces the source
+    # as well — the coarse axis was merging real logical pixels.
+    if g["cell_w"] != g["cell_h"]:
+        c = int(min(g["cell_w"], g["cell_h"]))
+        h, w = rgba.shape[:2]
+        sq = {"cell_w": c, "cell_h": c,
+              "offset_x": g["offset_x"] % c, "offset_y": g["offset_y"] % c,
+              "out_w": max(1, (w - g["offset_x"] % c) // c), "out_h": max(1, (h - g["offset_y"] % c) // c),
+              "score": g["score"], "detected": True}
+        small_sq = sample_cells(rgba, sq, mode=sampling)
+        recon_sq = _reconstruction_error(rgba, sq, small_sq)
+        if recon_sq <= recon * 1.05 + 0.5:
+            report["squared_from"] = [int(g["cell_w"]), int(g["cell_h"])]
+            g, small, recon = sq, small_sq, recon_sq
+            report.update(g)
+    report["reconstruction_error"] = round(recon, 2)
+    if recon > RECON_MAX_ERROR:
+        rescued = rescue_harmonic(rgba, g)
+        if rescued:
+            from_cell = [int(g["cell_w"]), int(g["cell_h"])]
+            g, small, recon2 = rescued
+            report.update(g)
+            report["harmonic_rescue"] = {"from_cell": from_cell, "reconstruction_error": round(recon2, 2)}
+            report["reconstruction_error"] = round(recon2, 2)
+            return rgba, g, small, report
+        report["rejected"] = (
+            "detected grid could not reproduce the source "
+            f"(error {recon:.1f} > {RECON_MAX_ERROR:g}) — no true pixel "
+            "grid; kept 1:1. Pass cell_size to force a grid.")
+        report["detected"] = False
+        g = {"cell_w": 1, "cell_h": 1, "offset_x": 0, "offset_y": 0,
+             "out_w": rgba.shape[1], "out_h": rgba.shape[0], "score": None, "detected": False}
+        return rgba, g, rgba.copy(), report
+    return rgba, g, small, report
 
 
 def _reconstruction_error(rgba, grid, small):
@@ -662,30 +808,20 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
              "score": None, "detected": False}
         report["grid"] = {**g, "mode": "manual"}
     elif grid == "auto":
-        g = detect_grid(rgba, max_cells_w=max_cells, max_cells_h=max_cells)
-        report["grid"] = {**g, "mode": "auto"}
+        rgba, g, small_auto, report["grid"] = resolve_grid(rgba, max_cells=max_cells, sampling=sampling)
     else:
         g = {"cell_w": 1, "cell_h": 1, "offset_x": 0, "offset_y": 0,
              "out_w": rgba.shape[1], "out_h": rgba.shape[0],
              "score": None, "detected": False}
         report["grid"] = {**g, "mode": "off"}
 
-    small = sample_cells(rgba, g, mode=sampling) \
-        if (g["cell_w"] > 1 or g["cell_h"] > 1) else rgba.copy()
-
-    # Auto-grid acceptance gate: if resampling on the detected grid can't
-    # reproduce the source, there was no true pixel grid (flat/vector art,
-    # photos) — refining would destroy the artwork, so keep it 1:1.
-    if report["grid"]["mode"] == "auto" and (g["cell_w"] > 1 or g["cell_h"] > 1):
-        recon = _reconstruction_error(rgba, g, small)
-        report["grid"]["reconstruction_error"] = round(recon, 2)
-        if recon > RECON_MAX_ERROR:
-            report["grid"]["rejected"] = (
-                "detected grid could not reproduce the source "
-                f"(error {recon:.1f} > {RECON_MAX_ERROR:g}) — no true pixel "
-                "grid; kept 1:1. Pass cell_size to force a grid.")
-            report["grid"]["detected"] = False
-            small = rgba.copy()
+    if report["grid"]["mode"] == "auto":
+        # resolve_grid already sampled, gated (reconstruction), rescued a
+        # harmonic and normalized a fractional cell — see its docstring
+        small = small_auto
+    else:
+        small = sample_cells(rgba, g, mode=sampling) \
+            if (g["cell_w"] > 1 or g["cell_h"] > 1) else rgba.copy()
 
     colors_before, _, _ = _unique_weighted_colors(small)
     report["colors_before"] = int(colors_before.shape[0])

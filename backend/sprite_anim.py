@@ -140,13 +140,13 @@ def prepare_native_frame(data, min_size, max_size, pad_to_multiple=1):
     whose sides are at least min_size. Returns (png_bytes, (w, h), info)."""
     rgba = _load_rgba(data)
     info = {"source_size": [int(rgba.shape[1]), int(rgba.shape[0])]}
-    g = pa.detect_grid(rgba)
+    _, g, small, grep = pa.resolve_grid(rgba)
     if g["detected"] and (g["cell_w"] > 1 or g["cell_h"] > 1):
-        small = pa.sample_cells(rgba, g)
-        if pa._reconstruction_error(rgba, g, small) <= pa.RECON_MAX_ERROR:
-            rgba = small
-            info["grid"] = {"cell": [int(g["cell_w"]), int(g["cell_h"])],
-                            "logical_size": [int(rgba.shape[1]), int(rgba.shape[0])]}
+        rgba = small
+        info["grid"] = {"cell": [int(g["cell_w"]), int(g["cell_h"])],
+                        "logical_size": [int(rgba.shape[1]), int(rgba.shape[0])]}
+        if grep.get("fractional"):
+            info["grid"]["fractional"] = grep["fractional"]
     rgba, box = crop_union([rgba])
     rgba = rgba[0]
     h, w = rgba.shape[:2]
@@ -225,22 +225,15 @@ def lock_style(reference, frame_size, *, cell_size=0, max_colors=DEFAULT_MAX_COL
         logical_w, logical_h = max(1, fw // cs), max(1, fh // cs)
         small_ref = None
     else:
-        g = pa.detect_grid(ref)
-        report["grid"] = {"mode": "auto", **{k: g[k] for k in
-                          ("cell_w", "cell_h", "detected", "score")}}
+        _, g, small_ref, grep = pa.resolve_grid(ref)
+        report["grid"] = {"mode": "auto", **{k: grep.get(k) for k in
+                          ("cell_w", "cell_h", "detected", "score", "reconstruction_error",
+                           "fractional", "harmonic_rescue", "rejected") if grep.get(k) is not None}}
         if g["detected"] and (g["cell_w"] > 1 or g["cell_h"] > 1):
-            small_ref = pa.sample_cells(ref, g)
-            recon = pa._reconstruction_error(ref, g, small_ref)
-            report["grid"]["reconstruction_error"] = round(recon, 2)
-            if recon > pa.RECON_MAX_ERROR:
-                # Not real pixel art (vector/flat) — treat every source pixel
-                # as logical so the frames are simply downsampled to it.
-                report["grid"]["rejected"] = "no true pixel grid in reference; using 1:1"
-                small_ref = ref.copy()
-                logical_w, logical_h = ref.shape[1], ref.shape[0]
-            else:
-                logical_w, logical_h = g["out_w"], g["out_h"]
+            logical_w, logical_h = int(small_ref.shape[1]), int(small_ref.shape[0])
         else:
+            # Not real pixel art (vector/flat) — treat every source pixel
+            # as logical so the frames are simply downsampled to it.
             small_ref = ref.copy()
             logical_w, logical_h = ref.shape[1], ref.shape[0]
         # The video model resized the reference to the frame size; map the

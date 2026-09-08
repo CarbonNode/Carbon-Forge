@@ -310,3 +310,61 @@ def test_refine_unknown_palette_raises():
     logical = make_logical(seed=14, w=8, h=8)
     with pytest.raises(ValueError, match="Unknown palette"):
         pa.refine_pixel_art(to_png(logical), palette="nope")
+
+
+# --- resolve_grid: fractional cells, harmonic rescue, square cells --------------
+
+def _five_color(rng, n):
+    pal = np.array([[200, 40, 40], [40, 200, 40], [40, 40, 220], [240, 220, 60], [30, 30, 30]], np.uint8)
+    out = np.zeros((n, n, 4), np.uint8)
+    out[..., :3] = pal[rng.integers(0, 5, size=(n, n))]
+    out[..., 3] = 255
+    return out
+
+
+def test_resolve_grid_recovers_fractional_cell():
+    """A 100x100 sprite drawn into 1024 px has a 10.24 px cell; integer
+    detection locks onto ~41 (4 cells) and merges pixels. resolve_grid finds
+    the fractional base, resamples to an exact 10 px grid and gets the sprite
+    back pixel-for-pixel."""
+    from PIL import Image, ImageFilter
+    rng = np.random.default_rng(7)
+    truth = _five_color(rng, 100)
+    big = Image.fromarray(truth, "RGBA").resize((1024, 1024), Image.NEAREST).filter(ImageFilter.GaussianBlur(0.6))
+    _, g, small, rep = pa.resolve_grid(np.array(big))
+    assert rep.get("fractional") and rep["fractional"]["cell"] == 10
+    assert (g["cell_w"], g["cell_h"]) == (10, 10)
+    assert small.shape[:2] == (100, 100)
+    assert (small[..., :3] == truth[..., :3]).all(-1).mean() > 0.99
+
+
+def test_resolve_grid_rescues_harmonic_on_sparse_sheet():
+    """Sparse sprites at a regular pitch out-score the true 4 px grid; the
+    harmonic rescue walks the divisors and lands on 4 (which reproduces the
+    source exactly and is periodic on both axes)."""
+    rng = np.random.default_rng(3)
+    sheet = np.zeros((4 * 48, 4 * 48, 4), np.uint8)
+    for r in range(4):
+        for c in range(4):
+            blob = _five_color(rng, 22)
+            sheet[r * 48 + 14:r * 48 + 36, c * 48 + 13:c * 48 + 35] = blob
+    x4 = pa.scale_nearest(sheet, 4)
+    forced = {"cell_w": 64, "cell_h": 64, "offset_x": 0, "offset_y": 36, "out_w": 12, "out_h": 11,
+              "score": 5.0, "detected": True}
+    rescued = pa.rescue_harmonic(x4, forced)
+    assert rescued is not None
+    g, small, recon = rescued
+    assert (g["cell_w"], g["cell_h"]) == (4, 4) and recon == 0.0
+    assert small.shape[:2] == (192, 192)
+    _, g2, small2, rep = pa.resolve_grid(x4)
+    assert (g2["cell_w"], g2["cell_h"]) == (4, 4)
+    assert (small2 == sheet).all()
+
+
+def test_resolve_grid_prefers_square_cells():
+    rng = np.random.default_rng(5)
+    truth = _five_color(rng, 40)
+    x8 = pa.scale_nearest(truth, 8)
+    _, g, small, rep = pa.resolve_grid(x8)
+    assert (g["cell_w"], g["cell_h"]) == (8, 8)
+    assert small.shape[:2] == (40, 40) and (small == truth).all()
