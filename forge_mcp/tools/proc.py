@@ -1,5 +1,5 @@
 """Image-processing tools — all delegate to the shared desktop pipeline."""
-from backend.pixel_art import DITHER_MODES, RETRO_PALETTES
+from backend.pixel_art import DITHER_MODES, RETRO_PALETTES, SPRITE_PRESET
 from backend.processing import PipelineOptions, parse_colors
 from forge_mcp import engine, storage
 
