@@ -514,3 +514,76 @@ def test_refine_despeckle_reports_what_it_removed():
     assert on["despeckled_px"] == 3
     out = np.array(Image.open(io.BytesIO(png)).convert("RGBA"))
     assert _components(out) == [64]
+
+
+# ---------------------------------------------------------------------------
+# Self-diagnosis — the pipeline names its own known failure modes
+# ---------------------------------------------------------------------------
+
+def _keyed_sprite_png(bg="#FF00FF", blur=2.2, size=24):
+    logical = np.zeros((size, size, 4), dtype=np.uint8)
+    logical[..., :3] = parse = pa.parse_hex_color(bg)
+    logical[..., 3] = 255
+    logical[6:18, 8:16, :3] = (53, 167, 65)
+    big = Image.fromarray(logical, "RGBA").resize((size * 16, size * 16), Image.NEAREST)
+    big = big.filter(ImageFilter.GaussianBlur(blur))
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_sprite_preset_is_the_documented_combination():
+    assert pa.SPRITE_PRESET == {
+        "sampling": "hard", "bg_tolerance": 70, "despeckle": 4,
+        "outline": "none", "max_colors": 12,
+    }
+
+
+def test_warnings_flag_soft_edges_from_medoid_sampling():
+    png, rep = pa.refine_pixel_art(_keyed_sprite_png(), remove_bg=True,
+                                   bg_color="#FF00FF", bg_tolerance=60,
+                                   cell_size=14, sampling="medoid", max_colors=6)
+    assert any("sampling='hard'" in w for w in rep["warnings"])
+
+
+def test_warnings_are_clean_under_the_sprite_preset():
+    png, rep = pa.refine_pixel_art(_keyed_sprite_png(), remove_bg=True,
+                                   bg_color="#FF00FF", cell_size=14,
+                                   **pa.SPRITE_PRESET)
+    soft = [w for w in rep["warnings"] if "sampling" in w or "floating" in w]
+    assert not soft, rep["warnings"]
+
+
+def test_warnings_flag_floating_islands():
+    a = np.zeros((16, 16, 4), dtype=np.uint8)
+    a[4:12, 4:12] = (10, 200, 10, 255)
+    a[0, 14] = (255, 255, 255, 255)
+    buf = io.BytesIO()
+    Image.fromarray(a, "RGBA").save(buf, format="PNG")
+    _, rep = pa.refine_pixel_art(buf.getvalue(), grid="off", trim=False, despeckle=0)
+    assert any("floating pixel island" in w for w in rep["warnings"])
+
+
+def test_warnings_flag_a_clipped_subject():
+    a = np.zeros((16, 16, 4), dtype=np.uint8)
+    a[..., :3] = (255, 0, 255)
+    a[..., 3] = 255
+    a[0:10, 0:10, :3] = (53, 167, 65)      # runs off the top-left corner
+    buf = io.BytesIO()
+    Image.fromarray(a, "RGBA").save(buf, format="PNG")
+    _, rep = pa.refine_pixel_art(buf.getvalue(), grid="off", remove_bg=True,
+                                 bg_color="#FF00FF", sampling="hard")
+    assert any("clipped at the canvas" in w for w in rep["warnings"])
+
+
+def test_warnings_flag_leftover_background_key():
+    _, rep = pa.refine_pixel_art(_keyed_sprite_png(), remove_bg=True,
+                                 bg_color="#FF00FF", bg_tolerance=10,
+                                 cell_size=14, sampling="hard", max_colors=6,
+                                 despill=False)
+    assert any("background key" in w for w in rep["warnings"])
+
+
+def test_warnings_key_is_always_present():
+    _, rep = pa.refine_pixel_art(_keyed_sprite_png(), grid="off")
+    assert isinstance(rep["warnings"], list)

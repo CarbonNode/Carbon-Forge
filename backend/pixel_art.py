@@ -884,6 +884,92 @@ def is_key_like(rgb, key_color, tolerance=90, excess=60):
 # Top-level pipeline — bytes in, PNG bytes + report out
 # ---------------------------------------------------------------------------
 
+SPRITE_PRESET = {
+    "sampling": "hard",      # medoid leaves anti-aliased edges -> grey halo
+    "bg_tolerance": 70,      # 24/45 miss Gemini's off-magenta haze band
+    "despeckle": 4,          # keying leaves disconnected specks
+    "outline": "none",       # generated art already carries its own outline
+    "max_colors": 12,
+}
+
+
+def diagnose(small, source_rgba=None, key_color=None, grid_report=None):
+    """Look at a finished sprite and name the known failure modes.
+
+    Every one of these cost a round trip to discover by eye, so the pipeline
+    reports them instead of leaving the caller to notice. Returns a list of
+    short, actionable strings — empty when the sprite is clean."""
+    warn = []
+    alpha = small[..., 3]
+    opaque = alpha > 0
+    total = int(opaque.sum())
+    if not total:
+        return ["the sprite is empty — the key removed everything, lower bg_tolerance"]
+
+    semi = int(((alpha > 0) & (alpha < 255)).sum())
+    if semi > max(4, total // 200):
+        warn.append(f"{semi} semi-transparent edge pixels (soft/blurry linework) "
+                    f"— use sampling='hard'")
+
+    if key_color is not None:
+        rgb = small[opaque][:, :3]
+        uniq = np.unique(rgb, axis=0)
+        bad = sum(1 for c in uniq if is_key_like(c, key_color))
+        if bad:
+            warn.append(f"{bad} palette entries still carry the background key "
+                        f"— raise bg_tolerance (and keep despill on)")
+
+    islands = _small_islands(opaque, limit=8)
+    if islands:
+        warn.append(f"{len(islands)} floating pixel island(s) ({sum(islands)} px) "
+                    f"— use despeckle=4")
+
+    if source_rgba is not None:
+        src = source_rgba[..., 3] > 0
+        edges = []
+        if src[0].any():
+            edges.append("top")
+        if src[-1].any():
+            edges.append("bottom")
+        if src[:, 0].any():
+            edges.append("left")
+        if src[:, -1].any():
+            edges.append("right")
+        if edges:
+            warn.append("subject is clipped at the canvas " + "/".join(edges) +
+                        " — ask the prompt for margin on all sides")
+
+    if grid_report is not None and not grid_report.get("detected") \
+            and grid_report.get("mode") == "auto":
+        warn.append("grid auto-detection failed — force cell_size "
+                    "(sweep 10/12/14/16 and pick by eye)")
+    return warn
+
+
+def _small_islands(opaque, limit=8):
+    """Sizes of opaque 4-connected components smaller than `limit` px."""
+    h, w = opaque.shape
+    seen = np.zeros((h, w), dtype=bool)
+    out = []
+    for sy in range(h):
+        for sx in range(w):
+            if not opaque[sy, sx] or seen[sy, sx]:
+                continue
+            stack = [(sy, sx)]
+            seen[sy, sx] = True
+            n = 0
+            while stack:
+                y, x = stack.pop()
+                n += 1
+                for ny, nx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                    if 0 <= ny < h and 0 <= nx < w and opaque[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+            if n < limit:
+                out.append(n)
+    return out
+
+
 def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
                      sampling="medoid", remove_bg=False, bg_color=None,
                      bg_tolerance=24, max_colors=0, palette=None,
@@ -903,6 +989,8 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
     img = Image.open(io.BytesIO(data)).convert("RGBA")
     rgba = np.array(img, dtype=np.uint8)
     report = {"input_size": [img.width, img.height]}
+    _keyed_source = None
+    _key_used = None
 
     if remove_bg:
         color = parse_hex_color(bg_color) if bg_color else dominant_border_color(rgba)
@@ -912,6 +1000,8 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
         if despill:
             rgba = despill_key(rgba, color)
             report["despill"] = "#%02x%02x%02x" % tuple(_as_rgb(color))
+        _keyed_source = rgba
+        _key_used = color
 
     if cell_size and int(cell_size) > 1:
         cs = int(cell_size)
@@ -991,6 +1081,10 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
         small = scale_nearest(small, scale)
         report["export_scale"] = scale
         report["export_size"] = [int(small.shape[1]), int(small.shape[0])]
+
+    report["warnings"] = diagnose(small, source_rgba=_keyed_source,
+                                  key_color=_key_used,
+                                  grid_report=report.get("grid"))
 
     buf = io.BytesIO()
     Image.fromarray(small, "RGBA").save(buf, format="PNG")

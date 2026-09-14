@@ -234,22 +234,23 @@ def register(mcp, ctx):
         grid: str = "auto",
         cell_size: int = 0,
         max_cells: int = 512,
-        sampling: str = "medoid",
+        preset: str = "",
+        sampling: str | None = None,
         remove_bg: bool = False,
         bg_color: str | None = None,
-        bg_tolerance: int = 24,
-        max_colors: int = 0,
+        bg_tolerance: int | None = None,
+        max_colors: int | None = None,
         palette: str | None = None,
         palette_colors: list[str] | None = None,
         dither: str = "none",
         dither_strength: float = 1.0,
-        outline: str = "none",
+        outline: str | None = None,
         outline_color: str = "#000000",
         trim: bool = True,
         scale: int = 1,
         target_px: int = 0,
         despill: bool = True,
-        despeckle: int = 0,
+        despeckle: int | None = None,
         subpath: str | None = None,
         filename: str | None = None,
     ) -> dict:
@@ -264,6 +265,19 @@ def register(mcp, ctx):
         for pixel art, sprites, or 8/16-bit style. No AI model involved: fast,
         deterministic, and it never repaints — every output color comes from
         the source.
+
+        preset='sprite': APPLY THIS FOR GAME SPRITES. Sets the combination that
+          was arrived at the hard way — sampling='hard' (the 'medoid' default
+          leaves anti-aliased edges, i.e. blurry linework), bg_tolerance=70 (24
+          and 45 both miss the faint off-key haze Gemini paints, which then
+          survives as junk beside the sprite), despeckle=4 (keying still leaves
+          a few disconnected specks), outline='none' (generated art already has
+          its own outline; adding another doubles it) and max_colors=12. Any
+          argument you pass explicitly still wins.
+        Every call returns analysis.warnings — a list naming exactly these
+          failure modes when they are present in YOUR output (soft edges,
+          leftover key, floating pixels, a subject clipped at the canvas edge,
+          failed grid detection). Read it; it is cheaper than eyeballing.
 
         image: https URL or workspace path '<Project>/<relative path>'.
         grid: 'auto' (detect cell size + offset; the default) or 'off' (keep
@@ -306,6 +320,18 @@ def register(mcp, ctx):
         size/offset, grid confidence, logical output size, and color counts
         before/after. If the grid detection picked a wrong size (check
         analysis.grid), re-run with cell_size set explicitly."""
+        if preset and preset not in ("sprite",):
+            return {"error": f"Unknown preset '{preset}' — use 'sprite' (or omit)."}
+        # A preset fills in only what the caller LEFT UNSET, so an explicit
+        # argument always wins. Without a preset these fall back to the
+        # engine's historical defaults.
+        base = dict(SPRITE_PRESET) if preset == "sprite" else {}
+        sampling = sampling if sampling is not None else base.get("sampling", "medoid")
+        bg_tolerance = bg_tolerance if bg_tolerance is not None else base.get("bg_tolerance", 24)
+        max_colors = max_colors if max_colors is not None else base.get("max_colors", 0)
+        outline = outline if outline is not None else base.get("outline", "none")
+        despeckle = despeckle if despeckle is not None else base.get("despeckle", 0)
+
         for name, value, allowed in (
             ("grid", grid, ("auto", "off")),
             ("sampling", sampling, ("medoid", "mean", "hard")),
