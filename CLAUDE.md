@@ -150,6 +150,16 @@ still recreated the container — off the previous image. It logged `BUILD_FAIL`
 together and looked like a successful deploy. Always read the log for `BUILD_OK`, never just
 `DEPLOY_DONE`.
 
+⚠️ **Slow, noisy first boot is NORMAL after a rebuild (2026-09-14).** `rembg` pulls `pymatting`,
+whose numba kernels compile with `cache=True` on first import. The container can crash-loop for
+**~2.5 minutes and ~8 restarts** — `EOFError: Ran out of input` (a half-written numba cache index)
+then `SystemError: unknown opcode 218` — before it settles and serves normally. Give it ~3 minutes
+before concluding a deploy failed. If it never settles, `docker compose ... up -d --force-recreate
+forge` gives it a clean writable layer: `restart: unless-stopped` restarts the SAME container, so a
+cache truncated by the first crash is re-read forever and the loop is self-sustaining. Rolling back
+is NOT an option — the build tags `carbon-forge-mcp:latest` in place and the previous image is
+pruned, so always fix forward.
+
 **Verify after deploy:** `https://forge.carbonrouting.dev/health` → 200; `python tests/manual_status.py http://192.168.0.177:5125/mcp` (FORGE_TOKEN env) → `workspace_writable: true`, `ffmpeg_available: true`.
 
 ## Audio / TTS (two providers)
@@ -207,6 +217,46 @@ gets its own grid, palette and bounding box and the result boils.
 - **Tests:** `tests/test_sprite_anim.py` simulates an I2V clip (shift + blur + noise + magenta key)
   and asserts the lock (cell size, palette, shared box, ≤ source colors), plus sheet slicing /
   row tags / shared crop for the sheet path.
+
+### Making pixel UNITS that don't look cutesy (2026-09-14, verified against Orc Incremental)
+
+Rober's reference is Orc Incremental: tiny (~20-30 px) units, **flat hand-drawn** fills, hard
+outlines, muted earthy palette, **side view only** (mirrored left/right — no 8-facing rotation).
+The recipe that landed, and the traps that cost iterations getting there:
+
+**Route:** `generate_image` (coarse + anti-chibi prompt, MAGENTA background) → `pixel_refine`
+(`outline:"none"`, forced `cell_size`, `max_colors` 6-12). NOT the 3D bake — see below.
+
+- **The 3D bake is the WRONG tool for small units.** `bake_sprite_sheet` renders *shaded 3D*
+  and downscales; the reference is *flat drawn*. At 14x18 px a KayKit knight bakes to an
+  unreadable grey blob (the 35° elevation crushes the figure). Keep `bake_sprite_sheet` for
+  cases that genuinely need 8 consistent facings; a side-view game needs two.
+- **Anti-chibi prompting is mandatory and it works.** "GRIM, NOT cute, NOT chibi, NOT a mascot,
+  SMALL head on a heavy hunched body, heavy brow, muted desaturated palette." Without those,
+  every model (Gemini and Retro Diffusion alike) drifts to big-head mascot proportions.
+- **RD imposes its own proportions — you cannot prompt them away.** `animate_sprite
+  engine:"retro-diffusion"` *re-draws* the character in its own 48 px chibi style. If "too
+  cutesy" is the complaint, RD is the cause, and the fix is `engine:"wan"` (animates YOUR
+  sprite, keeps your proportions) or the `action=` official-API path — not better prompting.
+- **`lock_palette:true` can destroy an RD result.** RD already returns true pixel art (~13-23
+  colours); snapping that onto a darker source palette turned a clean orc into mud. Lock only
+  when the source palette is genuinely the one you want.
+- **Re-cutting is FREE.** The raw RD sheet is saved in the job results (`rd_sheet`), so
+  `import_sprite_sheet` rebuilds the bundle with different tags/fps/palette at zero cost.
+  Never pay a second prediction to fix framing.
+- **`generate_image` ignores exact hex backgrounds.** Ask for `#00FF00`, get `#339B42`. ALWAYS
+  sample the actual corner pixel before keying, or the key silently misses.
+- **Never key on a colour near the subject's own palette.** Green background + green orc ate
+  the orc. Magenta is right for green creatures.
+- **`outline:"sharp"` on art that ALREADY has an outline doubles it** — and it traces the keyed
+  edge, tripling the chroma fringe (77 stray px vs 23). Use `outline:"none"` on generated art
+  that drew its own outline; reserve the outline pass for renders and video frames.
+- **Detailed art does not survive being crushed small.** A 200 px-detailed orc forced to 45 px
+  is mud. Generate AT unit coarseness ("VERY COARSE pixel grid, ~28 px tall, large pixel
+  blocks") rather than shrinking a detailed piece.
+- **Grid auto-detection fails on detailed/painterly art** (`analysis.grid.detected: false`, or a
+  1:1 fallback at the input size). Force `cell_size` — for a 1024 px generation, 30/33/36 gives
+  roughly 32/29/26 px sprites.
 
 ### Engine `retro-diffusion` ("astro") — Astropulse's rd-animation on Replicate (2026-09-08)
 
