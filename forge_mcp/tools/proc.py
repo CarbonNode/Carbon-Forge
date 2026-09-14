@@ -249,6 +249,7 @@ def register(mcp, ctx):
         scale: int = 1,
         target_px: int = 0,
         despill: bool = True,
+        despeckle: int = 0,
         subpath: str | None = None,
         filename: str | None = None,
     ) -> dict:
@@ -280,6 +281,12 @@ def register(mcp, ctx):
           reads as a coloured halo and, worse, gets learned by max_colors as a
           palette entry so the whole fringe snaps to it. Set false only if you
           are deliberately keeping key-coloured art.
+        despeckle (default 0 = off): drop opaque islands smaller than this many
+          pixels. Keying leaves stray specks — an off-key haze band survives as
+          a few disconnected pixels floating beside the sprite, invisible at 1x
+          and obvious once an engine scales it up. 4 is a good value. It DELETES
+          content, so keep it well under any real detached part (a held weapon,
+          a dot eye) that must survive.
         max_colors: k-means color reduction in Oklab space (0 = off).
         palette: map to a built-in retro palette — arne16, c64, gb_legacy,
           gb_light, gb_pocket, mono, msx, nes, pc98, pico8, sfc_bg,
@@ -319,7 +326,7 @@ def register(mcp, ctx):
             palette=palette_colors or palette, dither=dither,
             dither_strength=dither_strength, outline=outline,
             outline_color=outline_color, trim=trim, scale=scale,
-            target_px=target_px, despill=despill)
+            target_px=target_px, despill=despill, despeckle=despeckle)
         res = await storage.save_result(out, project=project, subpath=subpath,
                                         filename=filename or "pixel-refined",
                                         ext="png", cfg=cfg)

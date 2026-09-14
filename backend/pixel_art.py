@@ -720,6 +720,48 @@ def add_outline(rgba, color, style="rounded"):
     return out
 
 
+def remove_small_islands(rgba, min_size=0):
+    """Drop opaque connected components smaller than `min_size` pixels
+    (4-connectivity, pure NumPy — no scipy, this module stays model-free).
+
+    Chroma keying leaves stray specks behind: an off-key haze band or JPEG
+    mush survives the key as a handful of disconnected pixels floating beside
+    the sprite. They are invisible at 1x and obvious the moment the sprite is
+    scaled up in an engine. Measured on one 94x98 orc: 5 components — the
+    sprite at 6057 px plus four islands totalling 6 px, all from a background
+    haze band.
+
+    DELETES image content, so it is opt-in (min_size=0 disables). Keep the
+    threshold well under any real detached part — a held weapon or a dot eye
+    is a legitimate component and must survive."""
+    if not min_size or int(min_size) < 2:
+        return rgba
+    min_size = int(min_size)
+    opaque = rgba[..., 3] > 0
+    h, w = opaque.shape
+    seen = np.zeros((h, w), dtype=bool)
+    out = rgba.copy()
+    for sy in range(h):
+        row = opaque[sy]
+        for sx in range(w):
+            if not row[sx] or seen[sy, sx]:
+                continue
+            stack = [(sy, sx)]
+            seen[sy, sx] = True
+            comp = []
+            while stack:
+                y, x = stack.pop()
+                comp.append((y, x))
+                for ny, nx in ((y - 1, x), (y + 1, x), (y, x - 1), (y, x + 1)):
+                    if 0 <= ny < h and 0 <= nx < w and opaque[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+            if len(comp) < min_size:
+                for y, x in comp:
+                    out[y, x, 3] = 0
+    return out
+
+
 def auto_trim(rgba, threshold=16, margin=0):
     """Crop to the bounding box of pixels with alpha >= threshold."""
     rgba = np.asarray(rgba, dtype=np.uint8)
@@ -847,7 +889,8 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
                      bg_tolerance=24, max_colors=0, palette=None,
                      dither="none", dither_strength=1.0,
                      outline="none", outline_color="#000000",
-                     trim=True, scale=1, target_px=0, despill=True):
+                     trim=True, scale=1, target_px=0, despill=True,
+                     despeckle=0):
     """Full PixelRefiner pipeline. Returns (png_bytes, report_dict).
 
     grid: 'auto' (detect), 'off' (keep resolution), or pass cell_size > 0.
@@ -923,6 +966,12 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
         small = quantize(small, int(max_colors), dither=dither,
                          strength=dither_strength)
         report["palette"] = f"kmeans-{int(max_colors)}"
+
+    if despeckle and int(despeckle) >= 2:
+        before = int((small[..., 3] > 0).sum())
+        small = remove_small_islands(small, int(despeckle))
+        after = int((small[..., 3] > 0).sum())
+        report["despeckled_px"] = before - after
 
     if outline and outline != "none":
         small = add_outline(small, parse_hex_color(outline_color), style=outline)

@@ -268,6 +268,13 @@ The recipe that landed, and the traps that cost iterations getting there:
   haze bands across the canvas — one measured ~28,900 px at `(209,37,214)`, distance **46** from
   pure magenta, so a tolerance of 45 missed the lot by ONE unit and it survived as background junk
   floating above the sprite. Use **70**.
+- **Keying leaves FLOATING PIXELS — use `despeckle:4`.** Even at the right tolerance a few
+  off-key specks survive as islands beside the sprite: one 94x98 orc came out as **5 connected
+  components** — the body at 6057 px plus four islands totalling 6 px, all from the haze band.
+  Invisible at 1x, obvious the moment an engine scales the sprite up. `despeckle` drops opaque
+  components below N pixels; it is OFF by default because it deletes content, and the threshold
+  must stay well under any real detached part (a held weapon is its own component and must
+  survive — 4 is safe, the weapons measured here are 16+ px).
 - **Ask for margin, or the model clips the subject.** A generation came back with 183 opaque
   pixels on the bottom row — the character's feet cut off by the canvas. Put "full body inside the
   frame with margin on all sides, feet fully visible" in every sprite prompt.

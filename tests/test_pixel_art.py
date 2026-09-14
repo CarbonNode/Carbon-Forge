@@ -440,3 +440,77 @@ def test_refine_despill_can_be_turned_off():
     _, report = pa.refine_pixel_art(buf.getvalue(), grid="off", remove_bg=True,
                                     bg_color="#FF00FF", despill=False)
     assert "despill" not in report
+
+
+# ---------------------------------------------------------------------------
+# Despeckle — stray islands left behind by chroma keying
+# ---------------------------------------------------------------------------
+
+def _components(rgba):
+    """Count 4-connected opaque components (test-local, independent of the impl)."""
+    op = rgba[..., 3] > 0
+    h, w = op.shape
+    seen = np.zeros((h, w), dtype=bool)
+    sizes = []
+    for y in range(h):
+        for x in range(w):
+            if not op[y, x] or seen[y, x]:
+                continue
+            stack = [(y, x)]
+            seen[y, x] = True
+            n = 0
+            while stack:
+                cy, cx = stack.pop()
+                n += 1
+                for ny, nx in ((cy - 1, cx), (cy + 1, cx), (cy, cx - 1), (cy, cx + 1)):
+                    if 0 <= ny < h and 0 <= nx < w and op[ny, nx] and not seen[ny, nx]:
+                        seen[ny, nx] = True
+                        stack.append((ny, nx))
+            sizes.append(n)
+    return sorted(sizes, reverse=True)
+
+
+def _blob_with_specks():
+    a = np.zeros((16, 16, 4), dtype=np.uint8)
+    a[4:12, 4:12] = (10, 200, 10, 255)   # 64 px body
+    a[0, 14] = (255, 255, 255, 255)      # 1 px speck
+    a[1, 14] = (255, 255, 255, 255)      # joins the speck above -> 2 px island
+    a[15, 0] = (255, 255, 255, 255)      # 1 px speck
+    return a
+
+
+def test_remove_small_islands_drops_specks_and_keeps_the_body():
+    a = _blob_with_specks()
+    assert _components(a) == [64, 2, 1]
+    out = pa.remove_small_islands(a, 4)
+    assert _components(out) == [64]
+    assert (out[4:12, 4:12, 3] > 0).all(), "body must be untouched"
+
+
+def test_remove_small_islands_is_a_noop_when_disabled():
+    a = _blob_with_specks()
+    for disabled in (0, 1):
+        assert np.array_equal(pa.remove_small_islands(a, disabled), a)
+
+
+def test_remove_small_islands_keeps_a_legitimate_detached_part():
+    """A held weapon / detached prop is its own component and must survive —
+    the threshold is meant to be well under any real part."""
+    a = np.zeros((16, 20, 4), dtype=np.uint8)
+    a[4:12, 2:10] = (10, 200, 10, 255)    # body, 64 px
+    a[6:10, 13:17] = (200, 200, 200, 255)  # detached weapon, 16 px
+    a[0, 19] = (255, 255, 255, 255)        # 1 px speck
+    out = pa.remove_small_islands(a, 4)
+    assert _components(out) == [64, 16], "the weapon must not be despeckled away"
+
+
+def test_refine_despeckle_reports_what_it_removed():
+    a = _blob_with_specks()
+    buf = io.BytesIO()
+    Image.fromarray(a, "RGBA").save(buf, format="PNG")
+    _, off = pa.refine_pixel_art(buf.getvalue(), grid="off", trim=False, despeckle=0)
+    assert "despeckled_px" not in off
+    png, on = pa.refine_pixel_art(buf.getvalue(), grid="off", trim=False, despeckle=4)
+    assert on["despeckled_px"] == 3
+    out = np.array(Image.open(io.BytesIO(png)).convert("RGBA"))
+    assert _components(out) == [64]
