@@ -248,6 +248,7 @@ def register(mcp, ctx):
         trim: bool = True,
         scale: int = 1,
         target_px: int = 0,
+        despill: bool = True,
         subpath: str | None = None,
         filename: str | None = None,
     ) -> dict:
@@ -273,6 +274,12 @@ def register(mcp, ctx):
         remove_bg (+ bg_color '#rrggbb', bg_tolerance): key out a flat
           background color first (auto-samples the border when bg_color is
           unset). For complex backgrounds run remove_background first instead.
+        despill (default true): after keying, pull the key's chroma back out of
+          the surviving edge pixels. Keying only makes MATCHING pixels
+          transparent — partially-covered edge pixels keep the key's tint, which
+          reads as a coloured halo and, worse, gets learned by max_colors as a
+          palette entry so the whole fringe snaps to it. Set false only if you
+          are deliberately keeping key-coloured art.
         max_colors: k-means color reduction in Oklab space (0 = off).
         palette: map to a built-in retro palette — arne16, c64, gb_legacy,
           gb_light, gb_pocket, mono, msx, nes, pc98, pico8, sfc_bg,
@@ -312,7 +319,7 @@ def register(mcp, ctx):
             palette=palette_colors or palette, dither=dither,
             dither_strength=dither_strength, outline=outline,
             outline_color=outline_color, trim=trim, scale=scale,
-            target_px=target_px)
+            target_px=target_px, despill=despill)
         res = await storage.save_result(out, project=project, subpath=subpath,
                                         filename=filename or "pixel-refined",
                                         ext="png", cfg=cfg)

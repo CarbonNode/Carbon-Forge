@@ -284,49 +284,14 @@ def lock_style(reference, frame_size, *, cell_size=0, max_colors=DEFAULT_MAX_COL
 # 2. Per-frame refinement on the locked grid + palette
 # ---------------------------------------------------------------------------
 
-def _key_channels(key_rgb):
-    """(dominant, recessive) channel indices of a chroma key: magenta → ([0, 2], [1]),
-    green → ([1], [0, 2]). None when the key has no clear chroma (grey)."""
-    k = [int(v) for v in key_rgb]
-    dom = [i for i in range(3) if k[i] >= 128]
-    rec = [i for i in range(3) if k[i] < 128]
-    if not dom or not rec:
-        return None
-    return dom, rec
-
-
-def despill_key(rgba, key_color, strength=1.0):
-    """Remove the chroma-key tint that video compression smears into a sprite's
-    edges (and that a k-means palette then LEARNS): the key's excess — how far
-    its dominant channels rise above its recessive ones — is pulled back to
-    neutral. Magenta key: min(R, B) - G. Green key: G - max(R, B)."""
-    ch = _key_channels(pa.parse_hex_color(key_color))
-    if ch is None:
-        return rgba
-    dom, rec = ch
-    f = rgba.astype(np.int16)
-    excess = np.clip(np.min(f[..., dom], axis=-1) - np.max(f[..., rec], axis=-1), 0, None)
-    pull = (excess * float(strength)).astype(np.int16)
-    for i in dom:
-        f[..., i] = f[..., i] - pull
-    out = np.clip(f, 0, 255).astype(np.uint8)
-    out[..., 3] = rgba[..., 3]
-    return out
-
-
-def is_key_like(rgb, key_color, tolerance=90, excess=60):
-    """A palette entry that IS the key (within tolerance) or carries the key's
-    chroma (excess above `excess`) — those entries make every keyed fringe
-    pixel snap back to the key color."""
-    key = np.asarray(pa.parse_hex_color(key_color), dtype=np.int16)
-    c = np.asarray(rgb, dtype=np.int16)
-    if int(np.abs(c - key).sum()) < tolerance:
-        return True
-    ch = _key_channels(key)
-    if ch is None:
-        return False
-    dom, rec = ch
-    return int(c[dom].min() - c[rec].max()) > excess
+# The chroma-key helpers moved down into pixel_art so the STILL path
+# (refine_pixel_art / the pixel_refine tool) shares one implementation with the
+# animation path — a keyed sprite used to keep a coloured halo here but not
+# there. Re-exported under the original names; this module's callers are
+# unchanged.
+_key_channels = pa._key_channels
+despill_key = pa.despill_key
+is_key_like = pa.is_key_like
 
 
 def select_poses(frames, count, min_gap=1, threshold=24):

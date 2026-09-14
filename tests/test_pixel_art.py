@@ -368,3 +368,75 @@ def test_resolve_grid_prefers_square_cells():
     _, g, small, rep = pa.resolve_grid(x8)
     assert (g["cell_w"], g["cell_h"]) == (8, 8)
     assert small.shape[:2] == (40, 40) and (small == truth).all()
+
+
+# ---------------------------------------------------------------------------
+# Chroma-key despill (moved down from sprite_anim so the STILL path shares it)
+# ---------------------------------------------------------------------------
+
+def test_despill_pulls_key_chroma_out_of_edge_pixels():
+    # a half-covered edge pixel: green sprite colour smeared with magenta key
+    px = np.array([[[200, 90, 190, 120]]], dtype=np.uint8)
+    out = pa.despill_key(px, "#FF00FF")
+    r, g, b, a = (int(v) for v in out[0, 0])
+    assert a == 120, "alpha must be untouched"
+    # despill measures the excess from the WEAKER dominant channel, so that is
+    # the one driven to neutral; the stronger one keeps the hue's lean.
+    assert min(r, b) - g <= 0, "magenta excess must be gone"
+    assert min(r, b) - g < min(200, 190) - 90, "excess must shrink"
+    assert not pa.is_key_like([r, g, b], "#FF00FF")
+
+
+def test_despill_is_a_noop_for_a_greyscale_key():
+    px = np.array([[[200, 90, 190, 120]]], dtype=np.uint8)
+    assert np.array_equal(pa.despill_key(px, "#808080"), px)
+
+
+def test_despill_accepts_hex_or_tuple():
+    px = np.array([[[200, 90, 190, 255]]], dtype=np.uint8)
+    assert np.array_equal(pa.despill_key(px, "#FF00FF"),
+                          pa.despill_key(px, (255, 0, 255)))
+
+
+def test_is_key_like_spares_real_sprite_colours():
+    assert pa.is_key_like([233, 28, 230], "#FF00FF")      # the fringe colour
+    assert not pa.is_key_like([53, 167, 65], "#FF00FF")   # orc skin green
+    assert not pa.is_key_like([127, 66, 23], "#FF00FF")   # leather brown
+
+
+def test_refine_keyed_sprite_leaves_no_magenta_fringe():
+    """End to end: a sprite on a magenta field, blurred so the edge pixels pick
+    up the key's chroma. After refine the palette must contain no key-like
+    colour — this is the halo that used to survive into every keyed sprite."""
+    logical = np.zeros((24, 24, 4), dtype=np.uint8)
+    logical[..., :3] = (255, 0, 255)          # magenta field
+    logical[..., 3] = 255
+    logical[6:18, 8:16, :3] = (53, 167, 65)   # green sprite body
+
+    big = Image.fromarray(logical, "RGBA").resize((24 * 16, 24 * 16), Image.NEAREST)
+    big = big.filter(ImageFilter.GaussianBlur(2.2))   # smear the key into the edges
+    buf = io.BytesIO()
+    big.save(buf, format="PNG")
+
+    png, report = pa.refine_pixel_art(
+        buf.getvalue(), remove_bg=True, bg_color="#FF00FF", bg_tolerance=60,
+        max_colors=6, trim=True, despill=True)
+    out = np.array(Image.open(io.BytesIO(png)).convert("RGBA"))
+    opaque = out[out[..., 3] > 0][:, :3]
+    assert len(opaque), "sprite must survive the key"
+    offenders = [c.tolist() for c in np.unique(opaque, axis=0)
+                 if pa.is_key_like(c, "#FF00FF")]
+    assert not offenders, f"key-coloured fringe survived: {offenders}"
+    assert report.get("despill") == "#ff00ff"
+
+
+def test_refine_despill_can_be_turned_off():
+    px = np.zeros((8, 8, 4), dtype=np.uint8)
+    px[..., :3] = (255, 0, 255)
+    px[..., 3] = 255
+    px[2:6, 2:6, :3] = (53, 167, 65)
+    buf = io.BytesIO()
+    Image.fromarray(px, "RGBA").save(buf, format="PNG")
+    _, report = pa.refine_pixel_art(buf.getvalue(), grid="off", remove_bg=True,
+                                    bg_color="#FF00FF", despill=False)
+    assert "despill" not in report

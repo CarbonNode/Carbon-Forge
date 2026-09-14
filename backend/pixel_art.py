@@ -755,22 +755,87 @@ def rgb555_round(rgba):
 # Background keying (simple flat-color removal, pre-grid)
 # ---------------------------------------------------------------------------
 
+def dominant_border_color(rgba):
+    """The most common colour around all four edges — the implied chroma key."""
+    rgba = np.asarray(rgba, dtype=np.uint8)
+    edges = np.concatenate([
+        rgba[0, :, :3], rgba[-1, :, :3],
+        rgba[:, 0, :3], rgba[:, -1, :3]]).astype(np.int64)
+    keys = (edges[:, 0] << 16) | (edges[:, 1] << 8) | edges[:, 2]
+    uniq, counts = np.unique(keys, return_counts=True)
+    k = int(uniq[np.argmax(counts)])
+    return np.array([(k >> 16) & 0xFF, (k >> 8) & 0xFF, k & 0xFF])
+
+
 def key_background(rgba, color=None, tolerance=24):
     """Make pixels near the background color transparent. When color is None
     the dominant border color is used (samples all four edges)."""
     rgba = np.asarray(rgba, dtype=np.uint8).copy()
     if color is None:
-        edges = np.concatenate([
-            rgba[0, :, :3], rgba[-1, :, :3],
-            rgba[:, 0, :3], rgba[:, -1, :3]]).astype(np.int64)
-        keys = (edges[:, 0] << 16) | (edges[:, 1] << 8) | edges[:, 2]
-        uniq, counts = np.unique(keys, return_counts=True)
-        k = int(uniq[np.argmax(counts)])
-        color = np.array([(k >> 16) & 0xFF, (k >> 8) & 0xFF, k & 0xFF])
+        color = dominant_border_color(rgba)
     color = np.asarray(color, dtype=np.int64)
     dist = np.abs(rgba[..., :3].astype(np.int64) - color).max(axis=-1)
     rgba[dist <= tolerance, 3] = 0
     return rgba
+
+
+# --- chroma-key despill -----------------------------------------------------
+# Keying only makes matching pixels transparent; it leaves the key's CHROMA in
+# every partially-covered edge pixel, which then reads as a coloured halo and,
+# worse, gets LEARNED as a palette entry by k-means so the whole fringe snaps
+# back to it. These three live here (rather than in sprite_anim, where they
+# started) so BOTH the still path (refine_pixel_art) and the animation path
+# share one implementation.
+
+def _as_rgb(color):
+    """Accept '#rrggbb' or any 3-sequence; return a list of 3 ints."""
+    if isinstance(color, str):
+        return [int(v) for v in parse_hex_color(color)]
+    return [int(v) for v in np.asarray(color).reshape(-1)[:3]]
+
+
+def _key_channels(key_rgb):
+    """(dominant, recessive) channel indices of a chroma key: magenta → ([0, 2], [1]),
+    green → ([1], [0, 2]). None when the key has no clear chroma (grey)."""
+    k = _as_rgb(key_rgb)
+    dom = [i for i in range(3) if k[i] >= 128]
+    rec = [i for i in range(3) if k[i] < 128]
+    if not dom or not rec:
+        return None
+    return dom, rec
+
+
+def despill_key(rgba, key_color, strength=1.0):
+    """Remove the chroma-key tint smeared into a sprite's edges: the key's
+    excess — how far its dominant channels rise above its recessive ones — is
+    pulled back to neutral. Magenta key: min(R, B) - G. Green key: G - max(R, B)."""
+    ch = _key_channels(key_color)
+    if ch is None:
+        return rgba
+    dom, rec = ch
+    f = np.asarray(rgba, dtype=np.uint8).astype(np.int16)
+    excess = np.clip(np.min(f[..., dom], axis=-1) - np.max(f[..., rec], axis=-1), 0, None)
+    pull = (excess * float(strength)).astype(np.int16)
+    for i in dom:
+        f[..., i] = f[..., i] - pull
+    out = np.clip(f, 0, 255).astype(np.uint8)
+    out[..., 3] = np.asarray(rgba, dtype=np.uint8)[..., 3]
+    return out
+
+
+def is_key_like(rgb, key_color, tolerance=90, excess=60):
+    """A palette entry that IS the key (within tolerance) or carries the key's
+    chroma (excess above `excess`) — those entries make every keyed fringe
+    pixel snap back to the key color."""
+    key = np.asarray(_as_rgb(key_color), dtype=np.int16)
+    c = np.asarray(rgb, dtype=np.int16)
+    if int(np.abs(c - key).sum()) < tolerance:
+        return True
+    ch = _key_channels(key)
+    if ch is None:
+        return False
+    dom, rec = ch
+    return int(c[dom].min() - c[rec].max()) > excess
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +847,7 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
                      bg_tolerance=24, max_colors=0, palette=None,
                      dither="none", dither_strength=1.0,
                      outline="none", outline_color="#000000",
-                     trim=True, scale=1, target_px=0):
+                     trim=True, scale=1, target_px=0, despill=True):
     """Full PixelRefiner pipeline. Returns (png_bytes, report_dict).
 
     grid: 'auto' (detect), 'off' (keep resolution), or pass cell_size > 0.
@@ -797,8 +862,13 @@ def refine_pixel_art(data, grid="auto", cell_size=0, max_cells=AUTO_MAX_CELLS,
     report = {"input_size": [img.width, img.height]}
 
     if remove_bg:
-        color = parse_hex_color(bg_color) if bg_color else None
+        color = parse_hex_color(bg_color) if bg_color else dominant_border_color(rgba)
         rgba = key_background(rgba, color=color, tolerance=bg_tolerance)
+        # Pull the key's chroma out of the surviving edge pixels BEFORE the
+        # palette is fitted, so k-means never learns the key as a colour.
+        if despill:
+            rgba = despill_key(rgba, color)
+            report["despill"] = "#%02x%02x%02x" % tuple(_as_rgb(color))
 
     if cell_size and int(cell_size) > 1:
         cs = int(cell_size)
