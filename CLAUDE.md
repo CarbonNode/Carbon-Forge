@@ -86,11 +86,38 @@ Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 
 ## Deploy (hosted service)
 
-**2026-07-28: the API container moved to super_server** — compose project `carbon-forge`, checkout
-`C:\Programming\CarbonForge-src` (its `docker-compose.yml` is the production shape, `.env` untracked
-beside it). Deploy = push, then `deployer__explain {project:'carbon-forge'}` → `deployer__ship` (pulls,
-builds via a scheduled task, recreates `carbon-forge-adhoc`). The laybackrig recipe below is the OLD
-GPU-box variant (`docker-compose.forge.yml`), kept for the ComfyUI/Chatterbox workers.
+> ### ⛔ Production is **laybackrig**, NOT super_server — verified live 2026-09-14
+>
+> An earlier note here said "2026-07-28: the API container moved to super_server". **That move never
+> took over.** What actually serves `forge__*` today:
+>
+> | | Box | Path | Container | Reality |
+> |---|---|---|---|---|
+> | **PRODUCTION** | `laybackrig` | `C:\Programming\CarbonForge` | `carbon-forge-forge-1` (`docker-compose.forge.yml`) | what the tunnel + gateway point at |
+> | stale | `super_server` | `C:\Programming\CarbonForge-src` | `carbon-forge-adhoc` | dead since 2026-09-09, nothing routes to it |
+>
+> The proof chain, all pointing at laybackrig: the gateway connector row `forge` has
+> `url: https://forge.carbonrouting.dev/mcp` plus `wake: {node: "laybackrig", containers:
+> ["carbon-forge-forge-1", ...], health: "http://192.168.0.177:5125/health"}`; the
+> `cloudflared-gateway` ingress maps `forge.carbonrouting.dev → http://192.168.0.177:5125`
+> (= laybackrig); and `docker start carbon-forge-forge-1` on laybackrig takes the public
+> `/health` from 502 to 200 immediately.
+>
+> ⚠️ **`deployer__explain` / `deployer__ship {project:'carbon-forge'}` resolve to super_server** —
+> they find the compose *labels* there and cannot see that nothing routes to it. Shipping with them
+> deploys to a box no traffic reaches, and the new code silently never goes live. Use the laybackrig
+> scheduled-task recipe below instead.
+>
+> 🔌 **The containers are wake-on-demand, so `Exited (0)` is NORMAL, not an outage.** The gateway
+> starts them from that `wake` block on the first `forge__*` call. Do not diagnose a stopped
+> `carbon-forge-forge-1` as broken — check `https://forge.carbonrouting.dev/health` (or just call a
+> forge tool) first. super_server's copy, by contrast, is genuinely broken: it dies with
+> `failed to mount local volume //192.168.0.35/Workspace` (`Exited (255)`).
+>
+> laybackrig's `docker-compose.forge.yml` also carries an **uncommitted local production fix** —
+> the CIFS volume points at `//192.168.65.254:14450` (the Docker Desktop host gateway) instead of
+> `//192.168.0.35:445`. Never `git checkout` that file, and never commit it either: it is
+> box-specific. `git pull --ff-only` preserves it as long as upstream leaves the file alone.
 
 Lives at `C:\Programming\CarbonForge` on laybackrig. `.env` (gitignored) holds FORGE_TOKEN, GEMINI_API_KEY, CIFS creds.
 
@@ -104,11 +131,24 @@ ssh 192.168.0.177 "cd /d C:\Programming\CarbonForge && git pull && schtasks /cre
 ```bat
 @echo off
 cd /d C:\Programming\CarbonForge
+del build-forge.log 2>nul
 docker compose -f docker-compose.forge.yml build forge >> build-forge.log 2>&1
-if %errorlevel%==0 (echo BUILD_OK >> build-forge.log) else (echo BUILD_FAIL >> build-forge.log)
+if errorlevel 1 goto failed
+echo BUILD_OK >> build-forge.log
 docker compose -f docker-compose.forge.yml up -d forge >> build-forge.log 2>&1
 echo DEPLOY_DONE >> build-forge.log
+exit /b 0
+:failed
+echo BUILD_FAIL >> build-forge.log
+echo DEPLOY_SKIPPED >> build-forge.log
+exit /b 1
 ```
+
+⚠️ The `goto failed` guard matters: the **old** version of this script used
+`if %errorlevel%==0 (...) else (...)` and then ran `up -d` **unconditionally**, so a failed build
+still recreated the container — off the previous image. It logged `BUILD_FAIL` and `DEPLOY_DONE`
+together and looked like a successful deploy. Always read the log for `BUILD_OK`, never just
+`DEPLOY_DONE`.
 
 **Verify after deploy:** `https://forge.carbonrouting.dev/health` → 200; `python tests/manual_status.py http://192.168.0.177:5125/mcp` (FORGE_TOKEN env) → `workspace_writable: true`, `ffmpeg_available: true`.
 
