@@ -255,8 +255,15 @@ The recipe that landed, and the traps that cost iterations getting there:
   is mud. Generate AT unit coarseness ("VERY COARSE pixel grid, ~28 px tall, large pixel
   blocks") rather than shrinking a detailed piece.
 - **Grid auto-detection fails on detailed/painterly art** (`analysis.grid.detected: false`, or a
-  1:1 fallback at the input size). Force `cell_size` — for a 1024 px generation, 30/33/36 gives
-  roughly 32/29/26 px sprites.
+  1:1 fallback at the input size), so you must force `cell_size` — but force the grid the art was
+  actually DRAWN on, not the sprite size you wish you had. Guessing too coarse silently destroys
+  the face: the same 1024 px orc at cell 30 is a 32x32 mud blob, while cell 12-14 gives a 66-82 px
+  sprite with a readable brow, eye and tusks. **Sweep 12 / 14 / 16 / 20 and pick by eye** — a
+  detailed generation almost always sits in the 12-16 range.
+- **Below ~48 px a face cannot exist**, in any pipeline — that is 3-4 pixels of head. Orc
+  Incremental itself does not have faces on its battlefield units; they are silhouettes, and the
+  faces live in the big portrait row. Decide which register you are making: ~25 px silhouette
+  units, or 64-80 px sprites you can actually read. Do not expect one asset to be both.
 
 ### Engine `retro-diffusion` ("astro") — Astropulse's rd-animation on Replicate (2026-09-08)
 
