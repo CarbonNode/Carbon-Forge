@@ -201,3 +201,63 @@ def test_blender_script_exists_and_is_stdlib_safe():
     assert "BAKE_RESULT" in src and "from backend import bake_spec" in src
     # the Blender-side script must not pull the service's heavy deps into Blender's Python
     assert "import numpy" not in src and "from PIL" not in src
+
+
+# ---------------------------------------------------------------------------
+# Equipment sockets (attach) — the zero-drift variant route
+# ---------------------------------------------------------------------------
+
+def test_attach_normalizes_with_defaults():
+    spec = bs.normalize_spec({"attach": [{"model": "/a/axe.glb", "bone": "handslot.r"}]})
+    assert spec["attach"] == [{"model": "/a/axe.glb", "bone": "handslot.r",
+                               "scale": 1.0, "offset": [0.0, 0.0, 0.0],
+                               "rotation": [0.0, 0.0, 0.0]}]
+
+
+def test_attach_requires_model_and_bone():
+    for bad in ({"bone": "handslot.r"}, {"model": "a.glb"}, {"model": "", "bone": "b"}):
+        with pytest.raises(ValueError):
+            bs.normalize_spec({"attach": [bad]})
+    with pytest.raises(ValueError):
+        bs.normalize_spec({"attach": "not-a-list"})
+
+
+def test_attach_defaults_to_empty():
+    assert bs.normalize_spec({})["attach"] == []
+
+
+def test_framing_excludes_attachments_by_default():
+    """The camera must fit the BODY only. If equipment drove the bounds, a big
+    weapon would re-frame the shot and the same character would land on
+    different pixels in the armed and unarmed bakes — which is exactly the
+    drift socket variants exist to avoid."""
+    assert bs.normalize_spec({})["frame_attachments"] is False
+    assert bs.normalize_spec({"frame_attachments": True})["frame_attachments"] is True
+
+
+def test_render_spec_carries_attach_and_lighting():
+    spec = sb.render_spec(cell=48, attach=[{"model": "a.glb", "bone": "handslot.r"}],
+                          key_strength=0.6, ambient=1.6)
+    assert spec["attach"][0]["bone"] == "handslot.r"
+    norm = bs.normalize_spec(spec)
+    assert norm["key_strength"] == 0.6 and norm["ambient"] == 1.6
+
+
+def test_render_spec_leaves_lighting_at_defaults_when_unset():
+    norm = bs.normalize_spec(sb.render_spec())
+    assert norm["key_strength"] == bs.DEFAULT_SPEC["key_strength"]
+    assert norm["ambient"] == bs.DEFAULT_SPEC["ambient"]
+
+
+def test_attachment_bytes_are_written_beside_the_model(tmp_path):
+    """Socket meshes arrive as bytes from a URL; they must be materialised as
+    files BEFORE normalize_spec, which rebuilds each entry from known keys only
+    and would otherwise drop the private payload."""
+    work = str(tmp_path)
+    spec = sb.render_spec(attach=[{"model": "axe.glb", "bone": "handslot.r",
+                                   "_bytes": b"BLOB", "_ext": ".gltf"}])
+    with pytest.raises(Exception):
+        sb.run_blender_sync(b"glb", spec, runner=("python", "/bin/false"), keep_dir=work)
+    written = json.loads((tmp_path / "spec.json").read_text())
+    assert written["attach"][0]["model"].endswith("attach_0.gltf")
+    assert (tmp_path / "attach_0.gltf").read_bytes() == b"BLOB"

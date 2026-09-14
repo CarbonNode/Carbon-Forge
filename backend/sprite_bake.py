@@ -83,13 +83,28 @@ def run_blender_sync(glb_bytes, spec, *, runner=None, timeout_s=DEFAULT_TIMEOUT_
     if runner is None:
         raise BakeError("No Blender available: set FORGE_BLENDER_BIN (a blender binary) or "
                         "FORGE_BPY_PYTHON (a Python with the `bpy` wheel) on the forge service")
-    spec = bs.normalize_spec(spec)
     work = keep_dir or tempfile.mkdtemp(prefix="forge-bake-")
     try:
         glb_path = os.path.join(work, "model.glb")
         with open(glb_path, "wb") as f:
             f.write(glb_bytes)
         out_dir = os.path.join(work, "frames")
+        # Socket meshes may arrive as BYTES (the tool resolved a URL / workspace
+        # path). Materialise them beside the model FIRST — normalize_spec rebuilds
+        # each attach entry from known keys only, so the private _bytes/_ext would
+        # be dropped if this ran after it.
+        attach = []
+        for i, a in enumerate(spec.get("attach") or []):
+            a = dict(a)
+            blob = a.pop("_bytes", None)
+            ext = a.pop("_ext", ".glb") or ".glb"
+            if blob is not None:
+                apath = os.path.join(work, f"attach_{i}{ext}")
+                with open(apath, "wb") as af:
+                    af.write(blob)
+                a["model"] = apath
+            attach.append(a)
+        spec = bs.normalize_spec(dict(spec, attach=attach))
         full = dict(spec, glb=glb_path, out_dir=out_dir)
         spec_path = os.path.join(work, "spec.json")
         with open(spec_path, "w", encoding="utf-8") as f:
@@ -242,12 +257,25 @@ def rows_from_manifest(manifest, frame_files, action_prefix=None):
 
 
 def render_spec(*, cell=64, supersample=4, directions=8, frames=8, elevation_deg=35.0, actions=None,
-                loop=True, engine="cycles", samples=16, clip_actions=None):
+                loop=True, engine="cycles", samples=16, clip_actions=None, attach=None,
+                key_strength=None, ambient=None, light_azimuth_deg=None, light_elevation_deg=None):
     """The Blender-side spec for one GLB. `cell` is the logical sprite size the whole
-    animation's union bounds are fit into; the render is cell*supersample px."""
-    return {"directions": directions, "frames": frames, "render_px": int(cell) * int(supersample),
+    animation's union bounds are fit into; the render is cell*supersample px.
+
+    The lighting four (key_strength / ambient / light_azimuth_deg /
+    light_elevation_deg) are what decide whether the result reads as PIXEL ART or
+    as a shaded 3D model shrunk down — flatten the key and raise the ambient to
+    kill the gradient shading that survives the downsample. None leaves the
+    bake_spec default. `attach` bolts meshes onto named bones (equipment sockets)."""
+    spec = {"directions": directions, "frames": frames, "render_px": int(cell) * int(supersample),
             "elevation_deg": elevation_deg, "actions": actions, "loop": loop, "engine": engine,
-            "samples": samples, "clip_actions": clip_actions or {}}
+            "samples": samples, "clip_actions": clip_actions or {}, "attach": attach or []}
+    for key, val in (("key_strength", key_strength), ("ambient", ambient),
+                     ("light_azimuth_deg", light_azimuth_deg),
+                     ("light_elevation_deg", light_elevation_deg)):
+        if val is not None:
+            spec[key] = float(val)
+    return spec
 
 
 def render_rows_sync(glb_bytes, spec, *, action_prefix=None, runner=None, timeout_s=DEFAULT_TIMEOUT_S):

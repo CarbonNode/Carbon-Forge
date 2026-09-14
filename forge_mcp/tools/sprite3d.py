@@ -19,6 +19,7 @@ construction. The pixel-art look (grid, palette, outline) is applied after.
 The trade: the result reads as pre-rendered ("Warcraft II"), not hand-clustered.
 """
 import asyncio
+import os
 
 from backend import pixel_art as pa
 from backend import sprite_bake as sb
@@ -54,12 +55,49 @@ def register(mcp, ctx):
                     margin=max(0, int(margin)), fps=max(1, int(fps)), columns=int(columns), padding=int(padding),
                     scale=max(1, min(32, int(scale))))
 
-    def _render_kwargs(cell, supersample, directions, frames, elevation, engine, samples):
+    # How hard the key light sculpts the model. A strong key is what makes a bake
+    # read as "a 3D render shrunk down" instead of as pixel art: smooth shading
+    # ramps survive the medoid downsample as muddy gradients. Flattening the key
+    # and letting ambient fill do the work keeps flat colour areas flat, which is
+    # what hand-drawn pixel art actually looks like.
+    SHADING = {
+        "lit":  {"key_strength": 3.0, "ambient": 0.55},   # the original look
+        "soft": {"key_strength": 1.5, "ambient": 1.00},
+        "flat": {"key_strength": 0.6, "ambient": 1.60},   # closest to drawn pixel art
+    }
+
+    async def _resolve_attachments(attach, cfg):
+        """Download each socket mesh next to the model so Blender sees a local path."""
+        out = []
+        for i, a in enumerate(attach or []):
+            if not isinstance(a, dict) or not a.get("model") or not a.get("bone"):
+                raise ValueError(f"attach[{i}] needs both 'model' and 'bone'")
+            got = await storage.resolve_input(a["model"], cfg=cfg, kind="model")
+            out.append({**a, "_bytes": got.data,
+                        "_ext": os.path.splitext(str(a["model"]).split("?")[0])[1] or ".glb"})
+        return out
+
+    def _render_kwargs(cell, supersample, directions, frames, elevation, engine, samples,
+                       shading="lit", attach=None, key_strength=None, ambient=None,
+                       light_azimuth=None, light_elevation=None):
         if int(directions) not in sb.bs.DIRECTION_TAGS:
             raise ValueError(f"directions must be one of {sb.bs.SUPPORTED_DIRECTIONS}")
+        shading = str(shading or "lit").lower()
+        if shading not in SHADING:
+            raise ValueError(f"shading must be one of {', '.join(sorted(SHADING))}")
+        light = dict(SHADING[shading])
+        # explicit numbers always beat the preset
+        if key_strength is not None:
+            light["key_strength"] = float(key_strength)
+        if ambient is not None:
+            light["ambient"] = float(ambient)
         return dict(cell=max(8, min(512, int(cell))), supersample=max(1, min(8, int(supersample))),
                     directions=int(directions), frames=max(1, min(64, int(frames))),
-                    elevation_deg=float(elevation), engine=engine, samples=int(samples))
+                    elevation_deg=float(elevation), engine=engine, samples=int(samples),
+                    attach=attach or [],
+                    light_azimuth_deg=(None if light_azimuth is None else float(light_azimuth)),
+                    light_elevation_deg=(None if light_elevation is None else float(light_elevation)),
+                    **light)
 
     def _require_blender():
         if sb.find_blender(bpy_python=cfg.bpy_python or None, blender_bin=cfg.blender_bin or None) is None:
@@ -124,6 +162,12 @@ def register(mcp, ctx):
         engine: str = "cycles",
         samples: int = 16,
         clip_actions: dict | None = None,
+        shading: str = "lit",
+        attach: list[dict] | None = None,
+        key_strength: float | None = None,
+        ambient: float | None = None,
+        light_azimuth: float | None = None,
+        light_elevation: float | None = None,
         name: str = "sprite",
         subpath: str | None = None,
     ) -> dict:
@@ -152,14 +196,36 @@ def register(mcp, ctx):
           across EVERY frame; outline 'sharp'|'rounded' adds a 1px outline; dither as
           pixel_refine. engine 'cycles' (CPU, headless-safe) or 'workbench' (flat, needs GL).
         clip_actions: {"<action>": {"start": f, "end": f}} to trim an action's frame range.
+
+        shading: 'lit' (default, the original sculpted look) | 'soft' | 'flat'. THIS is the
+          dial that decides whether the result reads as pixel art or as a 3D render shrunk
+          down — a strong key light leaves smooth shading ramps that survive the downsample
+          as muddy gradients, while 'flat' (weak key, high ambient fill) keeps flat colour
+          areas flat, like drawn pixel art. key_strength / ambient / light_azimuth /
+          light_elevation override the preset numerically.
+
+        attach: EQUIPMENT SOCKETS — [{"model": <.glb/.gltf URL or workspace path>,
+          "bone": "handslot.r", "scale": 1.0, "offset": [x,y,z], "rotation": [rx,ry,rz]}].
+          Each entry is parented to that bone before the bake, so ONE character + N weapon
+          meshes produces N sheets whose BODY is pixel-identical — same rig, same action,
+          same camera, only the socket contents differ. This is the only variant route that
+          cannot drift; asking an image model to "change only the weapon" redraws the arms
+          as soon as the grip changes. Rigs that expose sockets name them: KayKit uses
+          handslot.r / handslot.l, Mixamo uses mixamorig:RightHand. A wrong bone name fails
+          loudly and lists the socket-looking bones it did find.
         Returns {job_id}; the job's results carry the bundle {sheet, gif, atlas, tags,
         tag_gifs, frames, preview, layout, report}."""
         compose_kw = _compose_kwargs(supersample, max_colors, palette, palette_colors, dither, outline,
                                      outline_color, margin, fps, columns, padding, scale)
-        render_kw = _render_kwargs(cell, supersample, directions, frames, elevation, engine, samples)
+        render_kw = _render_kwargs(cell, supersample, directions, frames, elevation, engine, samples,
+                                   shading=shading, key_strength=key_strength, ambient=ambient,
+                                   light_azimuth=light_azimuth, light_elevation=light_elevation)
         _require_blender()
         storage.validate_project(project, cfg=cfg)
         src = await storage.resolve_input(model, cfg=cfg, kind="model")
+        # Attachment meshes are resolved the same way as the model (URL or workspace
+        # path) and handed to Blender as local files.
+        render_kw["attach"] = await _resolve_attachments(attach, cfg)
         safe = storage.safe_filename(name)
         loop_flag = loop if loop is not None else (_is_loop(action_prefix, None) if action_prefix else True)
         job = jobs.create(kind="bake", model="blender-bake", prompt=f"{model} → {directions} dirs",

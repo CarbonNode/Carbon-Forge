@@ -27,7 +27,7 @@ import os
 import sys
 
 import bpy
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if os.path.dirname(HERE) not in sys.path:
@@ -69,6 +69,50 @@ def _import_glb(path):
     if not new:
         raise RuntimeError("the GLB imported no objects")
     return new
+
+
+def _attach_equipment(armatures, spec):
+    """Parent extra meshes onto named bones before the bake — the equipment socket.
+
+    This is the only variant route that cannot drift: one rig + N weapon meshes
+    renders N sheets whose BODY is pixel-identical, because it is literally the
+    same character, the same action and the same camera; only the socket
+    contents differ. Compare an image model asked to "change only the weapon",
+    which redraws the arms as soon as the grip changes.
+
+    Rigs that expose sockets name them — KayKit: handslot.r / handslot.l,
+    Mixamo: mixamorig:RightHand."""
+    attached = []
+    for att in spec.get("attach") or []:
+        bone = att["bone"]
+        arm = next((a for a in armatures if bone in a.data.bones), None)
+        if arm is None:
+            names = sorted({b.name for a in armatures for b in a.data.bones})
+            sockets = [n for n in names
+                       if any(k in n.lower() for k in ("slot", "hand", "weapon", "grip"))]
+            raise RuntimeError(
+                "attach: no bone named '%s' in the rig. %s"
+                % (bone, ("Socket-looking bones: " + ", ".join(sockets[:12]))
+                   if sockets else ("Bones include: " + ", ".join(names[:12]))))
+        objs = _import_glb(att["model"])
+        rest = arm.data.bones[bone]
+        tops = [o for o in objs if o.parent is None]
+        for o in tops:
+            o.parent = arm
+            o.parent_type = "BONE"
+            o.parent_bone = bone
+            # Blender bone-parents to the bone's TAIL; step back along its length
+            # so the attachment sits at the HEAD, where a grip socket actually is.
+            o.matrix_parent_inverse = Matrix.Translation((0.0, -rest.length, 0.0))
+            o.location = Vector(att["offset"])
+            o.rotation_mode = "XYZ"
+            o.rotation_euler = [math.radians(v) for v in att["rotation"]]
+            sc = float(att["scale"])
+            o.scale = (sc, sc, sc)
+        attached.append({"model": os.path.basename(att["model"]), "bone": bone,
+                         "armature": arm.name,
+                         "objects": [o.name for o in objs]})
+    return attached
 
 
 def _root_for(objects):
@@ -233,8 +277,20 @@ def bake(spec_path):
         except Exception:  # noqa: BLE001 — no view layer in some background setups
             return True
 
-    meshes = [o for o in objects if o.type == "MESH" and _renders(o)]
     armatures = [o for o in objects if o.type == "ARMATURE"]
+    # Attach BEFORE the bounds pass so a weapon that swings wide is framed too.
+    attached = _attach_equipment(armatures, spec)
+    if attached:
+        extra = [bpy.data.objects[n] for e in attached for n in e["objects"]]
+        objects = objects + [o for o in extra if o not in objects]
+
+    meshes = [o for o in objects if o.type == "MESH" and _renders(o)]
+    # The camera is fitted to the BODY, not the equipment — otherwise a big axe
+    # re-frames the shot and the same character lands on different pixels in the
+    # armed and unarmed bakes, which defeats the whole point of socket variants.
+    attached_names = {n for e in attached for n in e["objects"]}
+    bounds_meshes = meshes if spec["frame_attachments"] else \
+        [m for m in meshes if m.name not in attached_names] or meshes
     root = _root_for(objects)
 
     available = [a.name for a in bpy.data.actions]
@@ -264,7 +320,7 @@ def bake(spec_path):
         for fr in clip["frames"]:
             scene.frame_set(fr)
             depsgraph.update()
-            a, b, _ = _bounds(meshes, depsgraph)
+            a, b, _ = _bounds(bounds_meshes, depsgraph)
             lo = Vector((min(lo.x, a.x), min(lo.y, a.y), min(lo.z, a.z)))
             hi = Vector((max(hi.x, b.x), max(hi.y, b.y), max(hi.z, b.z)))
             samples.append((clip, fr))
@@ -276,7 +332,7 @@ def bake(spec_path):
             _assign_action(armatures, clip["action"])
         scene.frame_set(fr)
         depsgraph.update()
-        _, _, r = _bounds(meshes, depsgraph, center_xy=(cx, cy))
+        _, _, r = _bounds(bounds_meshes, depsgraph, center_xy=(cx, cy))
         radius = max(radius, r)
     center = Vector((cx, cy, (lo.z + hi.z) / 2.0))
 
@@ -320,7 +376,8 @@ def bake(spec_path):
         "glb": glb, "render_px": spec["render_px"], "directions": n_dir, "direction_tags": tags,
         "actions_available": available, "actions_baked": [c["name"] for c in clips],
         "frames_per_action": spec["frames"], "loop": spec["loop"], "engine": spec["engine"],
-        "elevation_deg": spec["elevation_deg"],
+        "elevation_deg": spec["elevation_deg"], "attached": attached,
+        "frame_attachments": spec["frame_attachments"],
         "bounds": {"min": [lo.x, lo.y, lo.z], "max": [hi.x, hi.y, hi.z],
                    "height": height, "radius": radius},
         "rows": rows, "frames_rendered": rendered,

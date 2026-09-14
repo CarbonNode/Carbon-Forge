@@ -43,6 +43,21 @@ DEFAULT_SPEC = {
     "ambient": 0.55,        # world light strength (flat fill so shadows never go black)
     "key_strength": 3.0,    # sun strength
     "clip_actions": {},     # per-action {"start": f, "end": f} frame overrides
+    # Equipment sockets: extra GLB/glTF meshes parented to a named bone before the
+    # bake, so one character + N weapons = N sheets whose BODY is pixel-identical.
+    # [{"model": "/path/axe.gltf", "bone": "handslot.r", "scale": 1.0,
+    #   "offset": [x, y, z], "rotation": [rx, ry, rz]}]  (offset/rotation in bone space,
+    # rotation in degrees). Rigs that expose sockets name them: KayKit uses
+    # handslot.r / handslot.l, Mixamo uses mixamorig:RightHand.
+    "attach": [],
+    # Whether socket meshes drive the camera framing. FALSE by default and that is
+    # the point: the camera is fitted to the BODY alone, so every variant of the
+    # same character shares one framing and the body renders pixel-identically.
+    # Let a weapon into the bounds and a big axe silently re-frames (and shifts)
+    # the whole character relative to the no-weapon bake. Set True only when you
+    # want the weapon guaranteed in frame and do not care about cross-variant
+    # alignment.
+    "frame_attachments": False,
 }
 
 
@@ -66,6 +81,29 @@ def normalize_spec(spec):
         raise ValueError("engine must be cycles, workbench or eevee")
     out["engine"] = eng
     out["loop"] = bool(out["loop"])
+    out["frame_attachments"] = bool(out.get("frame_attachments"))
+    att = out.get("attach") or []
+    if not isinstance(att, (list, tuple)):
+        raise ValueError("attach must be a list of {model, bone} objects")
+    norm_att = []
+    for i, a in enumerate(att):
+        if not isinstance(a, dict):
+            raise ValueError(f"attach[{i}] must be an object with 'model' and 'bone'")
+        model = str(a.get("model") or "").strip()
+        bone = str(a.get("bone") or "").strip()
+        if not model:
+            raise ValueError(f"attach[{i}].model is required (a .glb/.gltf path or URL)")
+        if not bone:
+            raise ValueError(f"attach[{i}].bone is required (the socket bone name)")
+        entry = {"model": model, "bone": bone,
+                 "scale": float(a.get("scale", 1.0) or 1.0),
+                 "offset": [float(v) for v in (a.get("offset") or (0.0, 0.0, 0.0))][:3],
+                 "rotation": [float(v) for v in (a.get("rotation") or (0.0, 0.0, 0.0))][:3]}
+        if len(entry["offset"]) != 3 or len(entry["rotation"]) != 3:
+            raise ValueError(f"attach[{i}] offset/rotation must each be 3 numbers")
+        norm_att.append(entry)
+    out["attach"] = norm_att
+
     if out["actions"] is not None:
         acts = [str(a) for a in out["actions"] if str(a).strip()]
         out["actions"] = acts or None
