@@ -260,6 +260,22 @@ The recipe that landed, and the traps that cost iterations getting there:
   the face: the same 1024 px orc at cell 30 is a 32x32 mud blob, while cell 12-14 gives a 66-82 px
   sprite with a readable brow, eye and tusks. **Sweep 12 / 14 / 16 / 20 and pick by eye** — a
   detailed generation almost always sits in the 12-16 range.
+- **Use `sampling:"hard"` for sprites — the `"medoid"` default is what makes linework look
+  blurry.** Medoid leaves anti-aliased edge pixels: measured 368 semi-transparent pixels forming a
+  grey halo around every outline on one 79x84 orc, vs **0** with `hard` (medoid + binary alpha).
+  This is the single biggest quality lever in the whole pipeline.
+- **`bg_tolerance` 45 is too tight for a Gemini magenta field.** Gemini paints faint off-magenta
+  haze bands across the canvas — one measured ~28,900 px at `(209,37,214)`, distance **46** from
+  pure magenta, so a tolerance of 45 missed the lot by ONE unit and it survived as background junk
+  floating above the sprite. Use **70**.
+- **Ask for margin, or the model clips the subject.** A generation came back with 183 opaque
+  pixels on the bottom row — the character's feet cut off by the canvas. Put "full body inside the
+  frame with margin on all sides, feet fully visible" in every sprite prompt.
+- **Refining cannot invent a grid the art never had.** Sweeping cell sizes 10-21 x every offset
+  (186 combinations) on an `edit_image` result gave a nearly FLAT reconstruction-error surface
+  (12.56 best vs 13.54 for a bad guess) — there was no true grid to find. Art prompted coarse from
+  the start snaps cleanly; art that has been through `edit_image` re-renders softer and never
+  fully crisps. Prefer regenerating over editing when the sprite must be crisp.
 - **Below ~48 px a face cannot exist**, in any pipeline — that is 3-4 pixels of head. Orc
   Incremental itself does not have faces on its battlefield units; they are silhouettes, and the
   faces live in the big portrait row. Decide which register you are making: ~25 px silhouette
