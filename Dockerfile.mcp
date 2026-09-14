@@ -20,7 +20,23 @@ RUN apt-get update \
     && npm install -g @gltf-transform/cli@4 \
     && npm cache clean --force
 
-COPY backend/__init__.py backend/processing.py backend/pixel_art.py backend/sprite_anim.py backend/
+# Headless Blender for the 3D→pixel sprite bake (bake_sprite_sheet / character_to_sprites).
+# The `bpy` wheel ships for CPython 3.11 only, so it lives in its OWN venv on Debian's
+# python3.11 — the service's 3.12 dependency graph is untouched (same isolation principle as
+# the extractor + gltf-transform layers). backend/blender_bake.py runs there as a subprocess
+# (FORGE_BPY_PYTHON). Cycles renders on CPU; the X/GL libs are what the wheel links at import.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3.11 python3.11-venv \
+       libgl1 libglx0 libglvnd0 libvulkan1 libxkbcommon0 libx11-6 libxext6 libxfixes3 libxi6 \
+       libxrender1 libxcb1 libxau6 libxdmcp6 libsm6 libice6 libbsd0 libmd0 libuuid1 libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && /usr/bin/python3.11 -m venv /opt/bpy \
+    && /opt/bpy/bin/pip install --no-cache-dir -U pip \
+    && /opt/bpy/bin/pip install --no-cache-dir bpy==4.5.13 \
+    && /opt/bpy/bin/python -c "import bpy; print('bpy', bpy.app.version_string)"
+ENV FORGE_BPY_PYTHON=/opt/bpy/bin/python
+
+COPY backend/__init__.py backend/processing.py backend/pixel_art.py backend/sprite_anim.py backend/bake_spec.py backend/blender_bake.py backend/sprite_bake.py backend/
 COPY forge_mcp/ forge_mcp/
 
 ENV U2NET_HOME=/models/u2net \

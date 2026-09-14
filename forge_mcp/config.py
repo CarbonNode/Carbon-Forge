@@ -24,6 +24,9 @@ class Config:
     elevenlabs_api_key: str            # cloud TTS (generate_speech provider='elevenlabs')
     replicate_api_token: str           # Replicate catalog (replicate_search/_model/_run)
     rd_api_key: str                    # Retro Diffusion official API (animate_sprite action=…, advanced animations)
+    meshy_api_key: str                 # Meshy.ai (character_to_sprites: image→3D, rig, animate)
+    bpy_python: str                    # Python with the `bpy` wheel — headless Blender for the sprite bake
+    blender_bin: str                   # alternative: a blender binary (FORGE_BLENDER_BIN)
     comfy_url: str
     comfy_presence_url: str            # primary box (laybackrig) gpu-status (:11435) — yield it to chim (high GPU util)
     comfy_overflow_url: str            # 2nd ComfyUI (e.g. maingamingrig) for overflow when primary is busy/gaming
@@ -50,6 +53,9 @@ def load_config() -> Config:
         elevenlabs_api_key=os.environ.get("ELEVENLABS_API_KEY", ""),
         replicate_api_token=os.environ.get("REPLICATE_API_TOKEN", ""),
         rd_api_key=os.environ.get("RETRO_DIFFUSION_API_KEY", ""),
+        meshy_api_key=os.environ.get("MESHY_API_KEY", ""),
+        bpy_python=os.environ.get("FORGE_BPY_PYTHON", "/opt/bpy/bin/python"),
+        blender_bin=os.environ.get("FORGE_BLENDER_BIN", ""),
         comfy_url=os.environ.get("FORGE_COMFY_URL", "").rstrip("/"),
         comfy_presence_url=os.environ.get("FORGE_COMFY_PRESENCE_URL", "http://host.docker.internal:11435").rstrip("/"),
         comfy_overflow_url=os.environ.get("FORGE_COMFY_OVERFLOW_URL", "").rstrip("/"),

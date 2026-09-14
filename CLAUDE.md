@@ -30,6 +30,15 @@ backend/
                   #   per row + per-row GIFs — Retro Diffusion / PixelLab / Aseprite exports).
                   #   → `animate_sprite` / `video_to_sprite_sheet` / `pack_sprite_sheet` /
                   #     `import_sprite_sheet` tools
+  bake_spec.py    # 3D→pixel bake CONVENTIONS, stdlib-only (both sides of the Blender process boundary):
+                  #   direction tags (s se e ne n nw w sw; facing 0 looks at the camera, model turns CCW),
+                  #   frame sampling (loop drops the last frame), spec validation, action-name matching
+  blender_bake.py # runs INSIDE Blender (bpy): GLB → union bounds over every sampled frame of every action
+                  #   (evaluated vertices, not rest-pose bound_box) → ortho cam + sun + flat world → render
+                  #   action × direction × frame, transparent, Standard view → manifest.json + PNGs
+  sprite_bake.py  # service half: run_blender (subprocess, never in-process) + compose (medoid downsample
+                  #   → ONE k-means palette over ALL frames → outline → ONE shared crop box → pack_sheet
+                  #   with `<action>_<facing>` frameTags + per-row GIFs) → tools/sprite3d.py
   server.py       # Desktop Flask wrapper (port 5123); PyInstaller entry
 forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shadow the pip `mcp` package)
   server.py       # FastMCP assembly: bearer auth on /mcp, /health, /files/<id>/<name>, lifespan
@@ -41,7 +50,9 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
   imaging.py      # Pillow format conversion (image_convert — plain convert/resize, no AI)
   assets3d.py     # GLB helpers: Draco compression (gltf-transform CLI, node in image) + stats
   engine.py       # async bridge to backend.processing (CPU semaphore, model-load lock)
-  tools/          # MCP tool definitions: proc, gen, vid, sprite, audio, extract, util, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, saved characters, audio TTS, batch/montage, generate_clip pipeline)
+  meshy_api.py    # Meshy.ai client (image→3D / text→3D / rig / animate / poll / GLB pick) + ACTIONS
+                  #   name→action_id map (idle 0, walk 30, run 14, attack 4, death 8, hurt 178, jump 466…)
+  tools/          # MCP tool definitions: proc, gen, vid, sprite, sprite3d, audio, extract, util, meta (incl. local Wan T2V/I2V, ESRGAN upscale, IPAdapter reference gen, saved characters, audio TTS, batch/montage, generate_clip pipeline)
                   #   sprite.py = "pixel animation is solved": animate_sprite (sprite → sheet bundle,
                   #   one async job; engine 'wan' = local I2V → frames → refine on the sprite's own
                   #   grid/palette, engine 'retro-diffusion' = Astropulse's rd-animation on
@@ -52,6 +63,9 @@ forge_mcp/        # Hosted MCP service (named forge_mcp, NOT mcp — would shado
                   #   = <name>.png sheet + <name>.json atlas + <name>.gif + preview.html + frames,
                   #   one save_bundle id. Refinement is never per-frame-independent — see the
                   #   module docstring for why (grid/palette/bbox "boil").
+                  #   sprite3d.py = the 3D-first route for ANIMATED units: bake_sprite_sheet (any animated
+                  #   .glb → N-facing sheet), character_to_sprites (concept image → Meshy image→3D → rig →
+                  #   clips → bake, one job), meshy_actions (clip names + balance)
                   #   audio.py = generate_speech / list_voices. TWO TTS providers:
                   #   ElevenLabs (cloud) + Chatterbox (local, isolated GPU container, see below)
                   #   util.py = quick conversions: audio_convert / audio_trim / image_convert /
@@ -71,6 +85,12 @@ Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 - **Generation needs `GEMINI_API_KEY`** in the service `.env`; without it those tools return a readable error and everything else works.
 
 ## Deploy (hosted service)
+
+**2026-07-28: the API container moved to super_server** — compose project `carbon-forge`, checkout
+`C:\Programming\CarbonForge-src` (its `docker-compose.yml` is the production shape, `.env` untracked
+beside it). Deploy = push, then `deployer__explain {project:'carbon-forge'}` → `deployer__ship` (pulls,
+builds via a scheduled task, recreates `carbon-forge-adhoc`). The laybackrig recipe below is the OLD
+GPU-box variant (`docker-compose.forge.yml`), kept for the ComfyUI/Chatterbox workers.
 
 Lives at `C:\Programming\CarbonForge` on laybackrig. `.env` (gitignored) holds FORGE_TOKEN, GEMINI_API_KEY, CIFS creds.
 
@@ -183,3 +203,48 @@ into the same bundle. What was verified on live output (don't guess — re-check
   results `rd_sheet.balance_cost`). Without the key the tool returns a readable error.
 - `import_sprite_sheet { sheet, frame_w, frame_h, row_tags }` is the same slicer for any sheet
   you already have (an RD web download, PixelLab, an Aseprite export).
+
+## 3D → pixel sprites (`character_to_sprites` / `bake_sprite_sheet`) — the animated-unit route (2026-09-14)
+
+Diffusion / video / puppet-rig generators drift between frames and cannot keep 8 facings
+consistent; a RIG cannot drift. So animated units go 3D-first (how Warcraft II / Diablo made their
+sprites) and the pixel look is applied afterwards on one locked grid + palette:
+
+```
+concept PNG ──Meshy image→3D──▶ textured .glb ──Meshy rig──▶ armature (+ FREE walk/run clips)
+   ──Meshy animate (action_id)──▶ one .glb per clip ──backend/blender_bake.py (bpy, subprocess)──▶
+   action × facing × frame PNGs ──sprite_bake.compose──▶ sheet + atlas (`walk_s`, `walk_se`, … `death_sw`)
+```
+
+- **`character_to_sprites { image | prompt, project, actions, directions, cell, … }`** runs the whole
+  chain as one job (`job_status`). Every intermediate `.glb` (model, rigged, each clip) is saved to
+  the results, so a re-bake with other `cell`/`palette`/`elevation` is **`bake_sprite_sheet` on the
+  clip .glb — no credits**. Meshy credits: image→3D ~20, rig 5, animate 3 per clip that is not free
+  (`walk`/`run` come with the rig). `meshy_actions` = name→id map + live balance. Humanoids only
+  (Meshy's rigger rejects animals/props/vehicles). Needs `MESHY_API_KEY` in the service `.env` (vault
+  label `meshy_api_key`, the same key the Cortex blender connector uses).
+- **Conventions (backend/bake_spec.py — never change one side only):** facing 0 = toward the camera
+  (`s`), tags run `s se e ne n nw w sw` (model rotates counter-clockwise seen from above; glTF +Z
+  forward becomes Blender −Y, the camera sits on −Y). `loop=true` drops the last sampled frame
+  (== first) for cycles; one-shots (attack/death/hurt/jump) keep the final pose; `loop=null` guesses
+  from the action name (`LOOPING` in tools/sprite3d.py). `cell` is the box the WHOLE animation's union
+  bounds fit into — the standing figure is smaller than `cell` (48-64 reads as Warcraft II).
+- **What the bake locks (why it does not boil):** ONE camera framing from the union bounds of every
+  sampled frame of every action (measured on evaluated vertices — a skinned mesh's `bound_box` is the
+  rest pose and was off by a metre); ONE k-means palette over ALL frames; ONE crop box across all rows
+  so the ground line is identical in every frame/facing. Render at `cell × supersample` (default 4),
+  Cycles on CPU (16 samples — the medoid downsample eats the noise), `Standard` view transform
+  (AgX/Filmic would desaturate the texture), transparent film, flat white world 0.55 + one sun that
+  does NOT turn with the character, so every facing is lit from screen-left like a real sprite set.
+- **Blender lives in its own venv:** the `bpy` wheel is CPython 3.11-only, so `Dockerfile.mcp` makes
+  `/opt/bpy` on Debian's python3.11 (`FORGE_BPY_PYTHON`) — the 3.12 service graph is untouched, same
+  isolation as gltf-transform/extractor. `sprite_bake.find_blender` also honours `FORGE_BLENDER_BIN`.
+  Gotchas found live: the glTF importer creates an unlinked `Icosphere` bone-shape in a
+  `glTF_not_exported` collection (skip anything `hide_render`/not `visible_get()`);
+  `read_factory_settings(use_empty=True)` can leave orphan datablocks (the script purges them);
+  Blender 4.4+ slotted actions need `animation_data.action_slot` set or the action does nothing.
+- **Tests:** `tests/test_sprite_bake.py` (conventions, subprocess plumbing with a fake Blender,
+  compose: palette lock, shared crop, ground line, tags/atlas) + `tests/test_meshy_api.py` — no
+  Blender needed. Live check after a deploy: `forge_status` → `blender_bake.available: true`,
+  `meshy_key_configured: true`; then `bake_sprite_sheet` on any animated .glb (Khronos CesiumMan:
+  8 dirs × 6 frames in ~4 s on CPU, verified locally 2026-09-14).

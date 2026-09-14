@@ -2,6 +2,7 @@
 import os
 import shutil
 
+from backend import sprite_bake as sb
 from backend.processing import AVAILABLE_MODELS
 from forge_mcp import engine
 from forge_mcp import generation as g
@@ -33,6 +34,10 @@ def register(mcp, ctx):
             "workspace_writable": ws_ok,
             "workspace_error": ws_err,
             "gemini_key_configured": bool(cfg.gemini_api_key),
+            "meshy_key_configured": bool(cfg.meshy_api_key),
+            "blender_bake": (lambda r: {"available": r is not None, "runner": r[0] if r else None,
+                                        "path": r[1] if r else None})(
+                sb.find_blender(bpy_python=cfg.bpy_python or None, blender_bin=cfg.blender_bin or None)),
             "results_cached": cache_files,
             "jobs_running": jobs.running_count(),
             "public_url": cfg.public_url,
