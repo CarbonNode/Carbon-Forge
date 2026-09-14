@@ -225,7 +225,19 @@ outlines, muted earthy palette, **side view only** (mirrored left/right — no 8
 The recipe that landed, and the traps that cost iterations getting there:
 
 **Route:** `generate_image` (coarse + anti-chibi prompt, MAGENTA background) → `pixel_refine`
-(`outline:"none"`, forced `cell_size`, `max_colors` 6-12). NOT the 3D bake — see below.
+**with `preset:"sprite"`** and a forced `cell_size`. NOT the 3D bake — see below.
+
+> ### ✅ You do not have to remember the rest of this list — `preset:"sprite"` IS the list
+> `pixel_refine { preset: "sprite" }` sets `sampling:"hard"`, `bg_tolerance:70`, `despeckle:4`,
+> `outline:"none"`, `max_colors:12` — every setting below that was learned by staring at bad
+> output. Anything you pass explicitly still wins, so the preset is a floor, not a cage.
+>
+> And **every call now returns `analysis.warnings`**, which names the failure modes actually
+> present in YOUR output: soft/blurry edges, leftover background key, floating pixel islands, a
+> subject clipped at the canvas edge, failed grid detection. **Read that array instead of
+> eyeballing the sprite** — it is the difference between one round trip and five. The only thing
+> it cannot choose for you is `cell_size` (that is a judgement about the art's real grid) and
+> whether the result looks good.
 
 - **The 3D bake is the WRONG tool for small units.** `bake_sprite_sheet` renders *shaded 3D*
   and downscales; the reference is *flat drawn*. At 14x18 px a KayKit knight bakes to an
