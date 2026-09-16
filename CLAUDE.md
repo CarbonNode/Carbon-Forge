@@ -3,7 +3,7 @@
 AI-powered asset generation & refinement. Repo: `CarbonNode/Carbon-Forge`. Two deliverables share one engine:
 
 1. **Desktop app** — Electron (`main.js`, `renderer/`) + bundled Python Flask backend (`backend/server.py`, PyInstaller via `npm run build-backend`). Runs locally on port 5123.
-2. **Hosted MCP service** — `forge_mcp/` package, Docker container on **laybackrig** (192.168.0.177:5125). Proxied by the Carbon Cortex gateway as connector **`forge`** (tools surface as `forge__*` in every gateway session).
+2. **Hosted MCP service** — `forge_mcp/` package, Docker container `carbon-forge-adhoc` on **super_server** (192.168.0.197:5125), with GPU workers (ComfyUI, Chatterbox, Trellis) on laybackrig/maingamingrig. Proxied by the Carbon Cortex gateway as connector **`forge`** (tools surface as `forge__*` in every gateway session).
 
 ## The one shared-engine rule
 
@@ -86,40 +86,49 @@ Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 
 ## Deploy (hosted service)
 
-> ### ⛔ Production is **laybackrig**, NOT super_server — verified live 2026-09-14
+> ### Production = **super_server** (orchestrator) + **laybackrig** (GPU workers) — since 2026-09-16
 >
-> An earlier note here said "2026-07-28: the API container moved to super_server". **That move never
-> took over.** What actually serves `forge__*` today:
->
-> | | Box | Path | Container | Reality |
+> | | Box | Path | Container / process | Reality |
 > |---|---|---|---|---|
-> | **PRODUCTION** | `laybackrig` | `C:\Programming\CarbonForge` | `carbon-forge-forge-1` (`docker-compose.forge.yml`) | what the tunnel + gateway point at |
-> | stale | `super_server` | `C:\Programming\CarbonForge-src` | `carbon-forge-adhoc` | dead since 2026-09-09, nothing routes to it |
+> | **PRODUCTION** orchestrator | `super_server` (192.168.0.197) | `C:\Programming\CarbonForge-src` | `carbon-forge-adhoc` (`docker-compose.yml`) | what `forge.carbonrouting.dev` + the gateway `forge` row point at. Always on. Imagen/Veo/Gemini, rembg, ffmpeg, Meshy, Replicate, Retro Diffusion, Blender bake all run HERE |
+> | GPU workers | `laybackrig` (192.168.0.177) | `C:\Programming\CarbonForge` | native ComfyUI `:8188`, `carbon-forge-chatterbox-1` `:5126`, `trellis-svc` `:8082` | reached through `FORGE_COMFY_URL` / `FORGE_CHATTERBOX_URL` in super_server's `.env`; overflow = maingamingrig (192.168.0.239) |
+> | retired | `laybackrig` | same | `carbon-forge-forge-1` (`docker-compose.forge.yml`) | the old orchestrator. Stopped 2026-09-16; nothing routes to it. Leave it stopped |
 >
-> The proof chain, all pointing at laybackrig: the gateway connector row `forge` has
-> `url: https://forge.carbonrouting.dev/mcp` plus `wake: {node: "laybackrig", containers:
-> ["carbon-forge-forge-1", ...], health: "http://192.168.0.177:5125/health"}`; the
-> `cloudflared-gateway` ingress maps `forge.carbonrouting.dev → http://192.168.0.177:5125`
-> (= laybackrig); and `docker start carbon-forge-forge-1` on laybackrig takes the public
-> `/health` from 502 to 200 immediately.
+> **Why it moved (2026-09-16):** the gateway's `forge` connector gated EVERY tool call on
+> laybackrig's forge + chatterbox `/health` (mcp-proxy wake-on-demand), so a rig that was off,
+> rebooting or in game mode meant no Imagen, no Veo, no rembg — "health-check error" on a cloud
+> generation. Now only the tools that actually use the rig depend on it: `generate_local`,
+> `generate_video_local`, `animate_image`, `generate_clip`, `edit_local`, `upscale_image` (ESRGAN),
+> `generate_with_reference` (IPAdapter), `generate_icon` with a local model, `animate_sprite`
+> engine `wan`, `generate_speech(provider='chatterbox')`, `generate_world` (Trellis). Those fail
+> with forge's OWN backend error (or fail over to maingamingrig) while everything else keeps
+> working. `list_models.installed_checkpoints` is empty while the rig is off — expected.
 >
-> ⚠️ **`deployer__explain` / `deployer__ship {project:'carbon-forge'}` resolve to super_server** —
-> they find the compose *labels* there and cannot see that nothing routes to it. Shipping with them
-> deploys to a box no traffic reaches, and the new code silently never goes live. Use the laybackrig
-> scheduled-task recipe below instead.
+> **Deploy the orchestrator:** push to `origin/main`, then `deployer__ship { project: "carbon-forge" }`
+> (compose-build on super_server: `git pull --ff-only`, build, recreate `carbon-forge-adhoc`,
+> health-check `https://forge.carbonrouting.dev/health`). The earlier warning that ship "deploys to
+> a box no traffic reaches" is obsolete — super_server IS the box traffic reaches.
 >
-> 🔌 **The containers are wake-on-demand, so `Exited (0)` is NORMAL, not an outage.** The gateway
-> starts them from that `wake` block on the first `forge__*` call. Do not diagnose a stopped
-> `carbon-forge-forge-1` as broken — check `https://forge.carbonrouting.dev/health` (or just call a
-> forge tool) first. super_server's copy, by contrast, is genuinely broken: it dies with
-> `failed to mount local volume //192.168.0.35/Workspace` (`Exited (255)`).
+> **Gateway row** (`connectors` table, name `forge`, type `mcp-proxy`): `url:
+> http://192.168.0.197:5125/mcp`, `wake: { node: "laybackrig", containers:
+> ["carbon-forge-chatterbox-1", "trellis-svc"], health: "http://192.168.0.177:5126/health",
+> presence: "http://192.168.0.177:11435/", tools: ["generate_speech", "list_voices",
+> "generate_world"], optional: true, gameModeTools: [...], gameModeContainers: [...] }`.
+> `wake.tools` scopes the gate to the tools that need those containers; `wake.optional` makes
+> the wake best-effort. Reference: `scripts/register-forge-connector.mjs` in carbon-cortex. A
+> settings edit hot-reloads within ~60s (the row's JSON is part of the instance key).
 >
-> laybackrig's `docker-compose.forge.yml` also carries an **uncommitted local production fix** —
-> the CIFS volume points at `//192.168.65.254:14450` (the Docker Desktop host gateway) instead of
-> `//192.168.0.35:445`. Never `git checkout` that file, and never commit it either: it is
-> box-specific. `git pull --ff-only` preserves it as long as upstream leaves the file alone.
+> **Gotchas:** super_server's `.env` must carry every key laybackrig's has (`MESHY_API_KEY` was
+> missing until 2026-09-16 — diff the key lists after adding a provider). Its CIFS volume uses the
+> plain `//192.168.0.35` address and works from super_server's Docker VM; the `:14450` portproxy
+> trick below is laybackrig-only. A leftover `netsh portproxy 127.0.0.1:5125 → laybackrig:5125` on
+> super_server (which made `curl localhost:5125` there answer from the WRONG box) was deleted
+> 2026-09-16 — do not re-add it. `Exited (255)` on `carbon-forge-adhoc` after a host reboot just
+> needs `docker start`; the 2026-09-09 "failed to mount local volume" was transient.
 
-Lives at `C:\Programming\CarbonForge` on laybackrig. `.env` (gitignored) holds FORGE_TOKEN, GEMINI_API_KEY, CIFS creds.
+#### laybackrig (GPU-side checkout — chatterbox / retired forge container)
+
+Lives at `C:\Programming\CarbonForge` on laybackrig. `.env` (gitignored) holds FORGE_TOKEN, GEMINI_API_KEY, CIFS creds. Build the `chatterbox` service here the same way (`build-chatterbox.bat`); the `forge` service here is the retired orchestrator.
 
 ```
 ssh 192.168.0.177 "cd /d C:\Programming\CarbonForge && git pull && schtasks /create /tn ForgeBuild /tr C:\Programming\CarbonForge\build-forge.bat /sc ONCE /st 23:59 /f && schtasks /run /tn ForgeBuild"
@@ -160,7 +169,7 @@ cache truncated by the first crash is re-read forever and the loop is self-susta
 is NOT an option — the build tags `carbon-forge-mcp:latest` in place and the previous image is
 pruned, so always fix forward.
 
-**Verify after deploy:** `https://forge.carbonrouting.dev/health` → 200; `python tests/manual_status.py http://192.168.0.177:5125/mcp` (FORGE_TOKEN env) → `workspace_writable: true`, `ffmpeg_available: true`.
+**Verify after deploy:** `https://forge.carbonrouting.dev/health` → 200; `python tests/manual_status.py http://192.168.0.197:5125/mcp` (FORGE_TOKEN env) → `workspace_writable: true`, `ffmpeg_available: true`.
 
 ## Audio / TTS (two providers)
 
@@ -173,8 +182,8 @@ pruned, so always fix forward.
 
 | Piece | Where | Notes |
 |---|---|---|
-| SMB share `Workspace` | carbonserver, `C:\Workspace`, account `forge-svc` | CIFS volume in docker-compose.forge.yml |
-| Public URL | `forge.carbonrouting.dev` ingress on `cloudflared-gateway` tunnel (carbonserver, `C:\Programming\mcp-gateway\cloudflared\config.yml`) | → `http://192.168.0.177:5125` |
+| SMB share `Workspace` | carbonserver, `C:\Workspace`, account `forge-svc` | CIFS volume in docker-compose.yml (super_server) / docker-compose.forge.yml (laybackrig) |
+| Public URL | `forge.carbonrouting.dev` ingress on `cloudflared-gateway` tunnel (carbonserver, `C:\Programming\mcp-gateway\cloudflared\config.yml`, not in git — edit + `docker restart cloudflared-gateway`) | → `http://192.168.0.197:5125` (super_server) |
 | Gateway connector | row `forge` (mcp-proxy) in gateway DB, category `media` | re-register: `scripts/register-forge-connector.mjs` in Carbon-Cortex (run via tsx inside `carbon-cortex-gateway-1`, needs FORGE_TOKEN env) |
 | Console UI | Carbon-Cortex `web/`: `HOME_APP_GROUPS.forge`, `connector-icons.ts`, `/icons/carbon-forge.png` | |
 
