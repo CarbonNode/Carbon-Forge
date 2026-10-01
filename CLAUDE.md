@@ -104,7 +104,9 @@ Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 > with forge's OWN backend error (or fail over to maingamingrig) while everything else keeps
 > working. `list_models.installed_checkpoints` is empty while the rig is off — expected.
 >
-> **Deploy the orchestrator:** push to `origin/main`, then `deployer__ship { project: "carbon-forge" }`
+> **Deploy the orchestrator:** push to `origin/main`, then Conduit's
+> `deploy { project: "carbon-forge", env: "prod", ref: "<pushed commit SHA>" }`.
+> The repo's `deploy.conduit.json` routes through the existing Cortex deployer
 > (compose-build on super_server: `git pull --ff-only`, build, recreate `carbon-forge-adhoc`,
 > health-check `https://forge.carbonrouting.dev/health`). The earlier warning that ship "deploys to
 > a box no traffic reaches" is obsolete — super_server IS the box traffic reaches.
