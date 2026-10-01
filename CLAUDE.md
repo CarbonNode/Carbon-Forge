@@ -104,7 +104,9 @@ Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 > with forge's OWN backend error (or fail over to maingamingrig) while everything else keeps
 > working. `list_models.installed_checkpoints` is empty while the rig is off — expected.
 >
-> **Deploy the orchestrator:** push to `origin/main`, then `deployer__ship { project: "carbon-forge" }`
+> **Deploy the orchestrator:** push to `origin/main`, then Conduit's
+> `deploy { project: "carbon-forge", env: "prod", ref: "<pushed commit SHA>" }`.
+> The repo's `deploy.conduit.json` routes through the existing Cortex deployer
 > (compose-build on super_server: `git pull --ff-only`, build, recreate `carbon-forge-adhoc`,
 > health-check `https://forge.carbonrouting.dev/health`). The earlier warning that ship "deploys to
 > a box no traffic reaches" is obsolete — super_server IS the box traffic reaches.
@@ -389,3 +391,23 @@ concept PNG ──Meshy image→3D──▶ textured .glb ──Meshy rig──�
   Blender needed. Live check after a deploy: `forge_status` → `blender_bake.available: true`,
   `meshy_key_configured: true`; then `bake_sprite_sheet` on any animated .glb (Khronos CesiumMan:
   8 dirs × 6 frames in ~4 s on CPU, verified locally 2026-09-14).
+
+### Directional consistency controls
+
+`character_to_sprites` accepts the same `shading`, `key_strength`, `ambient`,
+`light_azimuth`, `light_elevation` and `attach` controls as `bake_sprite_sheet`.
+Use `shading:"flat"` for flatter fills; the default stays `"lit"`. Each clip uses
+the same lighting settings and socket attachments. An attachment follows a named
+bone, so a lantern on the character's left hand stays there when the facing changes.
+Anatomical left/right does not change with screen position; mirroring asymmetric
+sprites would swap their equipment.
+
+Attachment structure and files are checked before a paid character job starts.
+The exact bone name must exist on the rig; that check happens during the bake.
+If the generated rig's bone names are unknown, first generate without attachments,
+inspect the saved rig, and re-bake the saved clip GLBs with `bake_sprite_sheet`.
+Flat lighting and sockets do not guarantee that image-to-3D preserves the concept's
+pose or hand-drawn style. Inspect the model and all facings before accepting a set.
+`tests/test_sprite3d_tools.py` covers the full job with fake providers: settings
+reach both free and paid clips, every facing is tagged, and invalid attachments
+fail before a job starts. No provider credits are spent by these tests.

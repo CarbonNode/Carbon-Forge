@@ -1,0 +1,19 @@
+{
+  "project": "carbon-forge",
+  "aliases": ["Carbon Forge", "Carbon-Forge"],
+  "boxes": ["super_server"],
+  "stacks": ["carbon-forge", "carbon-forge-adhoc"],
+  "defaultEnv": "prod",
+  "environments": {
+    "prod": {
+      "kind": "deployer",
+      "deployerProject": "carbon-forge",
+      "tier": "prod",
+      "box": "super_server",
+      "cwd": "C:\\Programming\\CarbonForge-src",
+      "url": "https://forge.carbonrouting.dev/health",
+      "how": "Push to origin/main, then use the registered carbon-forge deployer to sync and update only the Forge orchestrator on super_server."
+    }
+  },
+  "notes": "The GPU workers on laybackrig and maingamingrig are separate. This recipe updates only carbon-forge-adhoc. Verify the live MCP schema and changed behavior after deployment."
+}

@@ -67,11 +67,10 @@ def register(mcp, ctx):
     }
 
     async def _resolve_attachments(attach, cfg):
-        """Download each socket mesh next to the model so Blender sees a local path."""
+        """Validate the whole list before downloads or a paid character job starts."""
+        attachments = sb.bs.normalize_spec({"attach": attach})["attach"]
         out = []
-        for i, a in enumerate(attach or []):
-            if not isinstance(a, dict) or not a.get("model") or not a.get("bone"):
-                raise ValueError(f"attach[{i}] needs both 'model' and 'bone'")
+        for a in attachments:
             got = await storage.resolve_input(a["model"], cfg=cfg, kind="model")
             out.append({**a, "_bytes": got.data,
                         "_ext": os.path.splitext(str(a["model"]).split("?")[0])[1] or ".glb"})
@@ -364,6 +363,12 @@ def register(mcp, ctx):
         samples: int = 16,
         name: str = "unit",
         subpath: str | None = None,
+        shading: str = "lit",
+        attach: list[dict] | None = None,
+        key_strength: float | None = None,
+        ambient: float | None = None,
+        light_azimuth: float | None = None,
+        light_elevation: float | None = None,
     ) -> dict:
         """ONE concept image (or a text prompt) → a complete animated game unit as pixel
         sprites: Meshy turns the image into a textured 3D character, auto-rigs it, bakes
@@ -389,6 +394,16 @@ def register(mcp, ctx):
         directions / cell / frames / elevation / loop / supersample / max_colors / palette /
           palette_colors / outline / dither / fps / scale / engine: as bake_sprite_sheet
           (loop=null guesses per action: idle/walk/run cycle, attack/death/hurt one-shot).
+        shading: 'lit' (default) | 'soft' | 'flat', as bake_sprite_sheet. 'flat' reduces
+          sculpted shading for a flatter pixel-art look. key_strength / ambient /
+          light_azimuth / light_elevation override that preset for EVERY clip.
+        attach: [{"model": <.glb/.gltf URL or workspace path>, "bone": <exact rig bone>,
+          "scale": 1.0, "offset": [x,y,z], "rotation": [rx,ry,rz]}], as bake_sprite_sheet.
+          Props follow that same bone in every action and facing; left/right are the
+          character's anatomical sides, not screen sides. Use only known rig bone names.
+          If the generated rig's names are unknown, generate without attach, inspect the
+          saved rig, then use bake_sprite_sheet on the saved clips. Attachment structure
+          and files are checked before spending; bone existence is checked during the bake.
         Results: concept, model .glb, rigged .glb, one .glb per clip (re-bake any of them
         later with bake_sprite_sheet, no credits), then the sheet bundle."""
         if not cfg.meshy_api_key:
@@ -397,7 +412,9 @@ def register(mcp, ctx):
             return {"error": "Pass exactly one of image or prompt"}
         compose_kw = _compose_kwargs(supersample, max_colors, palette, palette_colors, dither, outline,
                                      outline_color, margin, fps, columns, padding, scale)
-        render_kw = _render_kwargs(cell, supersample, directions, frames, elevation, engine, samples)
+        render_kw = _render_kwargs(cell, supersample, directions, frames, elevation, engine, samples,
+                                   shading=shading, key_strength=key_strength, ambient=ambient,
+                                   light_azimuth=light_azimuth, light_elevation=light_elevation)
         acts = [str(a).strip().lower() for a in (actions or DEFAULT_ACTIONS) if str(a).strip()]
         if not acts:
             return {"error": "actions is empty"}
@@ -405,6 +422,7 @@ def register(mcp, ctx):
             M.resolve_action(a)  # fail fast on a typo before spending credits
         _require_blender()
         storage.validate_project(project, cfg=cfg)
+        render_kw["attach"] = await _resolve_attachments(attach, cfg)
         ref_png, ref_ext = None, "png"
         if image:
             src = await storage.resolve_input(image, cfg=cfg, kind="image")
