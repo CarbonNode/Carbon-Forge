@@ -1,6 +1,5 @@
 """Input resolution (URL / workspace path), result writing (workspace + cache), URL minting, janitor."""
 import asyncio
-import difflib
 import os
 import re
 import secrets
@@ -143,6 +142,11 @@ async def resolve_input(ref: str, *, cfg: Config, kind: str = "image") -> Resolv
 
 
 def validate_project(project: str, *, cfg: Config) -> str:
+    """Return the workspace folder name for `project`, creating it when it is new.
+
+    The workspace is an output mirror, not the list of real projects: a project made after it
+    was last synced (Grimharvest, 2026-10-16) has no folder there, and refusing it failed a whole
+    paid job over a missing directory. A case-only difference maps onto the existing folder."""
     if not project or "/" in project or "\\" in project or project.startswith("."):
         raise StorageError(f"Invalid project name: {project!r}")
     path = os.path.join(cfg.workspace_root, project)
@@ -153,9 +157,16 @@ def validate_project(project: str, *, cfg: Config) -> str:
                     if os.path.isdir(os.path.join(cfg.workspace_root, d)) and not d.startswith(".")]
     except OSError as e:
         raise StorageError(f"Workspace not reachable ({e}); cannot validate project '{project}'") from e
-    close = difflib.get_close_matches(project, existing, n=3, cutoff=0.5)
-    hint = f" Did you mean: {', '.join(close)}?" if close else ""
-    raise StorageError(f"No workspace project named '{project}'.{hint} (Use list_projects to see all.)")
+    for d in existing:
+        if d.lower() == project.lower():
+            return d
+    try:
+        os.mkdir(path)  # mkdir, not makedirs: never conjure a workspace root that is not there
+    except FileExistsError:
+        pass
+    except OSError as e:
+        raise StorageError(f"Could not create workspace project '{project}' ({e})") from e
+    return project
 
 
 def safe_filename(name: str) -> str:
@@ -202,7 +213,7 @@ async def save_result(data: bytes, *, project, subpath, filename, ext, cfg: Conf
     if project:
         sub = (subpath or "assets/forge").strip("/\\")
         try:
-            validate_project(project, cfg=cfg)
+            project = validate_project(project, cfg=cfg)
             rel_dir = "/".join([project] + sub.replace("\\", "/").split("/"))
             target_dir = _workspace_abs(rel_dir, cfg)
             await asyncio.to_thread(_makedirs, target_dir)
@@ -240,7 +251,7 @@ async def save_bundle(files: list, *, project, subpath, cfg: Config) -> dict:
     if project:
         sub = (subpath or "assets/forge").strip("/\\")
         try:
-            validate_project(project, cfg=cfg)
+            project = validate_project(project, cfg=cfg)
             rel_dir = "/".join([project] + sub.replace("\\", "/").split("/"))
             target_dir = _workspace_abs(rel_dir, cfg)
             await asyncio.to_thread(_makedirs, target_dir)

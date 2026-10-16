@@ -51,11 +51,42 @@ def test_workspace_input_reads_file(tmp_path):
     assert r.mime == "image/png" and r.data == PNG
 
 
-def test_validate_project_close_match(tmp_path):
+def test_validate_project_creates_a_new_project(tmp_path):
     cfg = make_cfg(tmp_path)
     os.makedirs(os.path.join(cfg.workspace_root, "PerennaMono"))
-    with pytest.raises(storage.StorageError, match="PerennaMono"):
-        storage.validate_project("perenamono", cfg=cfg)
+    assert storage.validate_project("Grimharvest", cfg=cfg) == "Grimharvest"
+    assert os.path.isdir(os.path.join(cfg.workspace_root, "Grimharvest"))
+
+
+def test_validate_project_case_maps_to_existing(tmp_path):
+    cfg = make_cfg(tmp_path)
+    os.makedirs(os.path.join(cfg.workspace_root, "PerennaMono"))
+    assert storage.validate_project("perennamono", cfg=cfg) == "PerennaMono"
+    assert sorted(os.listdir(cfg.workspace_root)) == ["PerennaMono"]
+
+
+def test_validate_project_rejects_paths(tmp_path):
+    cfg = make_cfg(tmp_path)
+    os.makedirs(cfg.workspace_root)
+    for bad in ("", "a/b", "a\\b", ".hidden"):
+        with pytest.raises(storage.StorageError, match="Invalid project name"):
+            storage.validate_project(bad, cfg=cfg)
+
+
+def test_validate_project_workspace_down_still_refuses(tmp_path):
+    cfg = make_cfg(tmp_path)  # workspace_root never created
+    with pytest.raises(storage.StorageError, match="not reachable"):
+        storage.validate_project("Grimharvest", cfg=cfg)
+    assert not os.path.exists(cfg.workspace_root)
+
+
+def test_save_result_new_project_lands_in_workspace(tmp_path):
+    cfg = make_cfg(tmp_path)
+    os.makedirs(cfg.workspace_root)
+    res = asyncio.run(storage.save_result(
+        PNG, project="Grimharvest", subpath="sprites", filename="walk", ext="png", cfg=cfg))
+    assert res["workspace_path"] == "C:\\Workspace\\Grimharvest\\sprites\\walk.png"
+    assert "workspace_write_error" not in res
 
 
 def test_save_result_writes_both_and_mints_url(tmp_path):

@@ -236,9 +236,8 @@ def test_save_bundle_one_id_and_workspace(tmp_path):
     assert out["workspace_dir"].startswith("C:\\Workspace\\Proj")
 
 
-def test_save_bundle_missing_project_keeps_cache(tmp_path):
-    cfg = make_cfg(tmp_path)
-    os.makedirs(cfg.workspace_root)
+def test_save_bundle_workspace_down_keeps_cache(tmp_path):
+    cfg = make_cfg(tmp_path)  # workspace_root never created -> the workspace write fails
     out = asyncio.run(storage.save_bundle([("a.png", PNG)], project="Nope",
                                           subpath=None, cfg=cfg))
     assert "workspace_write_error" in out
