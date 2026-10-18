@@ -2,7 +2,7 @@
 import asyncio
 from io import BytesIO
 
-from backend.processing import PipelineOptions
+from backend.processing import CUTOUT_MODEL, PipelineOptions
 from forge_mcp import engine
 from forge_mcp import generation as g
 from forge_mcp import storage
@@ -12,8 +12,19 @@ from forge_mcp import video
 ICON_TEMPLATE = (
     "A single {subject} icon, {style}, bold simple shapes, clean thick outlines, "
     "limited 2-3 color palette, centered with generous padding, front-on, no perspective, "
-    "no text, no watermark, flat solid #FFFFFF background, app-icon style, crisp high-contrast edges"
+    "no text, no watermark, {backdrop}, app-icon style, crisp high-contrast edges"
 )
+# A cut-out icon is rendered on mid-grey, not white: on white, a white part of the subject
+# (paper, a cloud, an envelope) is the same colour as the background and EVERY cutout model
+# erases it — 63-66% of the icon came out see-through in the 2026-10-18 bake-off; on grey
+# the same subjects lost 0%. Grey subjects on grey stayed whole too (outlines + BiRefNet).
+ICON_BACKDROP_CUT = "flat solid mid-grey #808080 background (the background is grey, not white)"
+ICON_BACKDROP_CARD = "flat solid #FFFFFF background"
+# The cut for an icon: BiRefNet (keeps pale parts), the background keyed only where it
+# touches the border, no alpha matting (it treats a light subject on a light backdrop as
+# background). Shared by generate_icon and the generate_image_grid isolate.
+ICON_CUT = dict(model=CUTOUT_MODEL, edge_smooth=True, auto_trim=True,
+                color_remove=True, color_auto_detect=True)
 
 
 def _square_pad(data: bytes, size: int = 512, pad_frac: float = 0.12,
@@ -143,8 +154,8 @@ def register(mcp, ctx):
             and weapons (e.g. between two hands gripping a handle, inside a drawn bow) so no
             interior background gets trapped during keying;
           - a crisp clean silhouette, no outline/border, no vignette, no drop shadow.
-        Then cut with remove_background(model='isnet-general-use', alpha_matting=true,
-        color_remove=true, color_auto_detect=true, edge_smooth=true, auto_trim=true)."""
+        Then cut with remove_background(model='birefnet-general-lite', color_remove=true,
+        color_auto_detect=true, edge_smooth=true, auto_trim=true)."""
         _require_key()
         if aspect_ratio not in g.IMAGE_ASPECTS:
             raise g.GenerationError(f"aspect_ratio must be one of {g.IMAGE_ASPECTS}")
@@ -304,8 +315,7 @@ def register(mcp, ctx):
             if len(cells) < n:
                 warnings.append(f"only {len(cells)} cells were drawn for {n} subjects")
 
-        iso_opts = PipelineOptions(model="isnet-general-use", alpha_matting=True, edge_smooth=True,
-                                   auto_trim=True, color_remove=True, color_auto_detect=True)
+        iso_opts = PipelineOptions(**ICON_CUT)
         base = storage.safe_filename(filename or (kind if kind != "custom" else (style[:24] or "grid")))
         results = []
         for idx, cell in enumerate(cells):
@@ -679,14 +689,16 @@ def register(mcp, ctx):
                             seed: int | None = None, subpath: str | None = None,
                             filename: str | None = None) -> dict:
         """Generate a clean app/UI ICON in one shot: builds an icon-optimized prompt, renders the
-        subject centered on a solid white background, cuts it out to TRANSPARENT (rembg clean-cutout
-        recipe), and squares + pads to `size`. Great for connector/app icons, logos, game items.
+        subject centered on a flat mid-grey background (white when transparent=false), cuts it out
+        to TRANSPARENT with BiRefNet (keeps white/pale parts of the subject whole), and squares +
+        pads to `size`. Great for connector/app icons, logos, game items.
           subject: what the icon depicts (e.g. "a purple robot head", "a shopping cart").
           style: 'flat vector' | '3D clay' | 'line art' | 'pixel art' | 'glassmorphism' | 'sticker' …
           model: 'flux' / 'pony' (LOCAL, free, uncensored) | 'imagen' (cloud).
           transparent: cut the background out to transparent (default true); false keeps the card.
           size: output square px (default 512)."""
-        prompt = ICON_TEMPLATE.format(subject=subject, style=style)
+        prompt = ICON_TEMPLATE.format(subject=subject, style=style,
+                                      backdrop=ICON_BACKDROP_CUT if transparent else ICON_BACKDROP_CARD)
         raster = None
         engine_str = None
         if model != "imagen":  # any local checkpoint (alias or installed filename); else cloud
@@ -718,9 +730,7 @@ def register(mcp, ctx):
         is_pixel_style = "pixel" in style.lower()
         refine_report = None
         if transparent:
-            opts = PipelineOptions(model="isnet-general-use", alpha_matting=True, edge_smooth=True,
-                                   auto_trim=True, color_remove=True, color_auto_detect=True)
-            out = await engine.run_pipeline(raster, opts)
+            out = await engine.run_pipeline(raster, PipelineOptions(**ICON_CUT))
             # pixel-art styled icons get grid-refined to true low-res pixels; the
             # reconstruction gate keeps 1:1 when the render has no real grid
             if is_pixel_style:

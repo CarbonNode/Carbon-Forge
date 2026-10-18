@@ -34,15 +34,22 @@ def register(mcp, ctx):
         """Remove the background from an image (rembg). image: https URL or workspace path
         '<Project>/<relative path>'. Optional pipeline steps: watermark removal first, then
         color removal, edge smoothing, and transparent-edge trim. Models: u2net (default),
-        u2netp (fast), u2net_human_seg, isnet-general-use, silueta. Saves into the project's
-        workspace folder (subpath default assets/forge) and returns the path + a shareable URL.
+        u2netp (fast), u2net_human_seg, isnet-general-use, silueta, birefnet-general-lite,
+        birefnet-general. Saves into the project's workspace folder (subpath default
+        assets/forge) and returns the path + a shareable URL.
 
         CLEAN-CUTOUT RECIPE (use this, not bare defaults — bare defaults leave a grey/white
         'sticker halo', worst on pale subjects shot on a light background): pass
-        model='isnet-general-use' (handles holes/negative space far better than u2net),
-        alpha_matting=true, edge_smooth=true, auto_trim=true. If the source was generated on a
-        flat solid background (the recommended way — see generate_image), also pass
-        color_remove=true + color_auto_detect=true to strip the residual background fringe.
+        model='birefnet-general-lite', edge_smooth=true, auto_trim=true. BiRefNet keeps pale
+        and white parts of the subject (porcelain, paper, cream ribbons) that isnet-general-use
+        erases into see-through holes; it takes ~10 s on a 1024 px image. Leave alpha_matting
+        off for a light subject on a light background (matting reads it as background). If the
+        source was generated on a flat solid background (the recommended way — see
+        generate_image), also pass color_remove=true + color_auto_detect=true: the detected
+        background colour is only keyed where it connects to the image border, so matching
+        colours INSIDE the subject stay. Colours you name in `colors` are keyed everywhere.
+        No model can separate a white subject from a white background: generate on a backdrop
+        far from the subject's colours (mid-grey #808080 suits icons; magenta for skin/foliage).
         Halo on an ALREADY-cut transparent image? Rescue it with smooth_edges(trim_px~6,
         strength~3) to erode + defringe the matte. Solid background still TRAPPED inside
         enclosed gaps (letter counters, keyholes, circles) afterwards? Pass clean_holes=true

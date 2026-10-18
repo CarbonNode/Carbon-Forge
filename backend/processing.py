@@ -25,7 +25,14 @@ AVAILABLE_MODELS = [
     {"id": "u2net_human_seg", "name": "U2-Net Human", "desc": "Optimized for people"},
     {"id": "isnet-general-use", "name": "IS-Net (General)", "desc": "Great edge detection"},
     {"id": "silueta", "name": "Silueta", "desc": "Lightweight general purpose"},
+    {"id": "birefnet-general-lite", "name": "BiRefNet Lite", "desc": "Best for icons and items: keeps pale/white parts of the subject"},
+    {"id": "birefnet-general", "name": "BiRefNet", "desc": "Full BiRefNet: same quality as Lite on icons, about 2x slower"},
 ]
+
+# The model the clean-cutout recipes use (generate_icon, the grid isolate). IS-Net erases
+# pale parts of a subject — white porcelain, paper, cream ribbons lost 15-45% of the icon
+# in a 2026-10-18 bake-off — while BiRefNet Lite kept them, at ~10 s a 1024 px image on CPU.
+CUTOUT_MODEL = "birefnet-general-lite"
 
 # LaMa watermark removal model — env override (hosted service) > frozen exe dir
 # (packaged desktop builds) > module dir (dev)
@@ -196,8 +203,21 @@ def remove_watermark(img_bytes, position="bottom-right", height_ratio=0.15, widt
 
 # --- Post-processing ---
 
-def remove_colors(img_bytes, colors, tolerance):
-    """Post-process: make pixels close to any target color transparent."""
+def _border_connected(mask):
+    """The parts of a boolean mask that touch the image border (8-connected)."""
+    lab, _ = label(mask, structure=np.ones((3, 3), dtype=int))
+    edge = np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]]))
+    edge = edge[edge != 0]
+    return np.isin(lab, edge) if edge.size else np.zeros_like(mask)
+
+
+def remove_colors(img_bytes, colors, tolerance, border_only=False):
+    """Post-process: make pixels close to any target color transparent.
+
+    border_only: clear only matching pixels connected to the image border, i.e. the
+    background around the subject. Use it whenever the colour is the BACKGROUND colour:
+    without it every subject pixel that happens to match (white paper on a white
+    background, a grey tower on grey) is punched out as a see-through hole."""
     img = Image.open(io.BytesIO(img_bytes)).convert("RGBA")
     data = np.array(img, dtype=np.float32)
 
@@ -224,10 +244,12 @@ def remove_colors(img_bytes, colors, tolerance):
         mask = combined_mask
     else:
         mask = combined_mask & (saturation < 40)
+    if border_only:
+        mask = _border_connected(mask)
     data[:, :, 3] = np.where(mask, 0, a)
 
     print(f"Color removal: {len(colors)} colors, tolerance={tolerance}, max_dist={max_dist:.1f}, "
-          f"pixels removed={mask.sum()}", flush=True)
+          f"border_only={border_only}, pixels removed={mask.sum()}", flush=True)
 
     result = Image.fromarray(data.astype(np.uint8))
     buf = io.BytesIO()
@@ -519,7 +541,10 @@ def parse_colors(raw_colors):
 def run_pipeline(data: bytes, opts: PipelineOptions) -> bytes:
     """The desktop /remove-bg pipeline: watermark -> bg removal -> colors -> edges -> trim."""
     colors = list(opts.colors)
-    if opts.color_auto_detect or (opts.color_remove and not colors):
+    # An auto-detected colour IS the background, so it is only keyed where it touches the
+    # border; colours the caller named are keyed everywhere, as asked.
+    auto_bg = bool(opts.color_auto_detect or (opts.color_remove and not colors))
+    if auto_bg:
         colors = [detect_bg_color(data)]
 
     if opts.watermark_remove:
@@ -542,7 +567,7 @@ def run_pipeline(data: bytes, opts: PipelineOptions) -> bytes:
         result = data
 
     if opts.color_remove and colors:
-        result = remove_colors(result, colors, opts.color_tolerance)
+        result = remove_colors(result, colors, opts.color_tolerance, border_only=auto_bg)
 
     if opts.clean_iso:
         result = clean_edges(result, color=opts.clean_color, tolerance=opts.clean_tolerance,
@@ -575,8 +600,10 @@ def run_split_pipeline(data: bytes, opts: PipelineOptions, min_area: int = 400) 
         kwargs["alpha_matting_erode_size"] = opts.erode_size
     result = remove(data, **kwargs)
 
-    all_colors = [bg_color] + list(opts.colors)
-    result = remove_colors(result, all_colors, max(opts.color_tolerance, 25))
+    tol = max(opts.color_tolerance, 25)
+    result = remove_colors(result, [bg_color], tol, border_only=True)
+    if opts.colors:
+        result = remove_colors(result, list(opts.colors), tol)
 
     smooth_str = opts.edge_strength if opts.edge_smooth else 60
     smooth_trim = opts.edge_trim if opts.edge_smooth else 2
