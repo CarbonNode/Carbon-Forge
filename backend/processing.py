@@ -245,7 +245,11 @@ def remove_colors(img_bytes, colors, tolerance, border_only=False):
     else:
         mask = combined_mask & (saturation < 40)
     if border_only:
-        mask = _border_connected(mask)
+        # rembg leaves the removed background transparent (and black), so the leftover
+        # fringe is reached THROUGH transparency: count see-through pixels as background
+        # when deciding what touches the border. A hole inside the subject is sealed off
+        # by opaque pixels, so matching colour around it is still left alone.
+        mask = _border_connected(mask | (a < 10)) & mask
     data[:, :, 3] = np.where(mask, 0, a)
 
     print(f"Color removal: {len(colors)} colors, tolerance={tolerance}, max_dist={max_dist:.1f}, "

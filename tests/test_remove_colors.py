@@ -62,3 +62,16 @@ def test_border_only_with_no_border_match_clears_nothing():
     a[8:12, 8:12, :3] = 255                                # sealed white pocket only
     out = _load(remove_colors(_png(a), [(255, 255, 255)], 20, border_only=True))
     assert out[10, 10, 3] == 255
+
+
+def test_border_only_reaches_fringe_through_already_transparent_background():
+    """After rembg the background is transparent black, so a grey fringe left around the
+    subject only touches the border through transparency. It must still be keyed."""
+    a = np.zeros((40, 40, 4), dtype=np.uint8)              # transparent black (rembg output)
+    a[10:30, 10:30] = (128, 128, 128, 200)                 # grey fringe ring around subject
+    a[12:28, 12:28] = (30, 30, 30, 255)                    # dark subject outline block
+    a[15:25, 15:25] = (128, 128, 128, 255)                 # grey INSIDE the subject (keep)
+    out = _load(remove_colors(_png(a), [(128, 128, 128)], 20, border_only=True))
+    assert out[11, 11, 3] == 0        # fringe cleared
+    assert out[20, 20, 3] == 255      # sealed grey inside the subject kept
+    assert out[13, 13, 3] == 255      # outline kept
