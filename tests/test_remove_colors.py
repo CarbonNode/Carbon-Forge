@@ -75,3 +75,16 @@ def test_border_only_reaches_fringe_through_already_transparent_background():
     assert out[11, 11, 3] == 0        # fringe cleared
     assert out[20, 20, 3] == 255      # sealed grey inside the subject kept
     assert out[13, 13, 3] == 255      # outline kept
+
+
+def test_border_only_keeps_an_opaque_grey_face_that_touches_the_transparency():
+    """A graphite subject cut from the grey icon backdrop: its opaque grey face meets the
+    transparent background at the silhouette. Reaching it through transparency erased
+    whole faces of real icons (2026-10-19); only the semi-transparent fringe may go."""
+    a = np.zeros((40, 40, 4), dtype=np.uint8)              # transparent black (rembg output)
+    a[8:32, 8:32] = (128, 128, 128, 200)                   # grey fringe ring around subject
+    a[10:30, 10:30] = (120, 120, 120, 255)                 # opaque grey face, on the edge
+    out = _load(remove_colors(_png(a), [(128, 128, 128)], 20, border_only=True))
+    assert out[9, 9, 3] == 0          # fringe cleared
+    assert out[10, 20, 3] == 255      # face edge kept
+    assert out[20, 20, 3] == 255      # face kept

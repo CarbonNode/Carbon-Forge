@@ -247,9 +247,14 @@ def remove_colors(img_bytes, colors, tolerance, border_only=False):
     if border_only:
         # rembg leaves the removed background transparent (and black), so the leftover
         # fringe is reached THROUGH transparency: count see-through pixels as background
-        # when deciding what touches the border. A hole inside the subject is sealed off
-        # by opaque pixels, so matching colour around it is still left alone.
-        mask = _border_connected(mask | (a < 10)) & mask
+        # when deciding what touches the border. Only a semi-transparent pixel can be
+        # fringe that way: the subject's own opaque faces also touch the transparency at
+        # the silhouette, and a grey/graphite face on the grey icon backdrop matches the
+        # key, so flooding through opaque pixels erased whole faces (23% of one icon,
+        # 2026-10-19). Opaque matching pixels go only where they touch the border directly
+        # (background rembg kept), and a hole sealed inside the subject is still left alone.
+        through_clear = _border_connected(mask | (a < 10)) & mask & (a < 250)
+        mask = _border_connected(mask) & mask | through_clear
     data[:, :, 3] = np.where(mask, 0, a)
 
     print(f"Color removal: {len(colors)} colors, tolerance={tolerance}, max_dist={max_dist:.1f}, "
