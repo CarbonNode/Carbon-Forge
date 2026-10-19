@@ -1,11 +1,14 @@
 """remove_colors / the pipeline's background key must not punch holes in the subject.
 Pure numpy/scipy, no network or model downloads (skip_bg=True skips rembg)."""
 import io
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from backend.processing import PipelineOptions, remove_colors, run_pipeline
+
+FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _png(arr):
@@ -88,3 +91,15 @@ def test_border_only_keeps_an_opaque_grey_face_that_touches_the_transparency():
     assert out[9, 9, 3] == 0          # fringe cleared
     assert out[10, 20, 3] == 255      # face edge kept
     assert out[20, 20, 3] == 255      # face kept
+
+
+def test_real_graphite_icon_keeps_its_faces():
+    """Real BiRefNet cut of an Imagen graphite icon rendered on the #808080 icon backdrop
+    (backdrop detected as (122,122,122)). The key must take fringe only: when it flooded
+    through transparency it erased 23.5% of this subject (2026-10-19). Synthetic tests
+    alone let that through, so a real render pins it."""
+    a = _load(open(FIXTURES / "icon-graphite-birefnet-cut.png", "rb").read())
+    out = _load(remove_colors(_png(a), [(122, 122, 122)], 20, border_only=True))
+    subject = a[..., 3] > 128
+    lost = (subject & (out[..., 3] < 128)).sum() / subject.sum()
+    assert lost < 0.01, f"background key erased {lost:.1%} of the subject"
