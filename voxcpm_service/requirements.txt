@@ -1,0 +1,7 @@
+voxcpm==2.0.3
+torch==2.6.0
+torchaudio==2.6.0
+torchcodec==0.2.1
+transformers==4.51.3
+fastapi==0.115.12
+uvicorn==0.34.2

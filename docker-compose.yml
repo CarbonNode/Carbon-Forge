@@ -19,6 +19,8 @@ services:
     ports:
       - "5125:5125"
     env_file: .env
+    environment:
+      FORGE_VOXCPM_URL: ${FORGE_VOXCPM_URL:-http://192.168.0.177:5127}
     volumes:
       - forge-models:/models
       - forge-results:/results

@@ -1,0 +1,10 @@
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY voxcpm_service/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+COPY voxcpm_service/ /app/voxcpm_service/
+ENV HF_HOME=/models/hf VOXCPM_MODEL_DIR=/models/voxcpm2 OMP_NUM_THREADS=2
+EXPOSE 5127
+CMD ["uvicorn", "voxcpm_service.server:app", "--host", "0.0.0.0", "--port", "5127", "--workers", "1", "--no-access-log"]

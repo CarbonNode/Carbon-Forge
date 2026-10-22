@@ -41,6 +41,8 @@ class Config:
     max_image_mb: int
     max_video_mb: int
     gemini_api_keys: tuple = ()
+    voxcpm_url: str = ""               # isolated VoxCPM2 worker
+    voxcpm_token: str = ""             # defaults to this service's FORGE_TOKEN
 
 
 def load_config() -> Config:
@@ -70,4 +72,6 @@ def load_config() -> Config:
         max_image_mb=int(os.environ.get("FORGE_MAX_IMAGE_MB", "50")),
         max_video_mb=int(os.environ.get("FORGE_MAX_VIDEO_MB", "500")),
         gemini_api_keys=gkeys,
+        voxcpm_url=os.environ.get("FORGE_VOXCPM_URL", "").rstrip("/"),
+        voxcpm_token=os.environ.get("FORGE_VOXCPM_TOKEN", os.environ.get("FORGE_TOKEN", "")),
     )

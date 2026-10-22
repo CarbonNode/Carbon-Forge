@@ -1,0 +1,24 @@
+# Separate from the orchestrator and existing Chatterbox/CHIM containers.
+name: carbon-forge-voxcpm
+services:
+  voxcpm:
+    build:
+      context: .
+      dockerfile: Dockerfile.voxcpm
+    image: carbon-forge-voxcpm:latest
+    container_name: carbon-forge-voxcpm
+    ports: ["5127:5127"]
+    environment:
+      FORGE_TOKEN: ${FORGE_TOKEN:?Forge worker needs the same token as the orchestrator}
+    volumes: ["voxcpm-models:/models"]
+    gpus: all
+    cpus: 2
+    mem_limit: 12g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5127/health', timeout=5)"]
+      interval: 60s
+      timeout: 8s
+      start_period: 30s
+volumes:
+  voxcpm-models:

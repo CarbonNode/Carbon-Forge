@@ -1,8 +1,17 @@
 {
   "project": "carbon-forge",
-  "aliases": ["Carbon Forge", "Carbon-Forge"],
-  "boxes": ["super_server"],
-  "stacks": ["carbon-forge", "carbon-forge-adhoc"],
+  "aliases": [
+    "Carbon Forge",
+    "Carbon-Forge"
+  ],
+  "boxes": [
+    "super_server",
+    "laybackrig"
+  ],
+  "stacks": [
+    "carbon-forge",
+    "carbon-forge-adhoc"
+  ],
   "defaultEnv": "prod",
   "environments": {
     "prod": {
@@ -13,7 +22,16 @@
       "cwd": "C:\\Programming\\CarbonForge-src",
       "url": "https://forge.carbonrouting.dev/health",
       "how": "Push to origin/main, then use the registered carbon-forge deployer to sync and update only the Forge orchestrator on super_server."
+    },
+    "prod-voxcpm": {
+      "kind": "script",
+      "box": "laybackrig",
+      "cwd": "C:\\Programming",
+      "tier": "prod",
+      "timeoutMin": 30,
+      "run": "if not exist C:\\Programming\\ForgeVoxCPM\\.git git clone https://github.com/CarbonNode/Carbon-Forge.git C:\\Programming\\ForgeVoxCPM\r\ncd /d C:\\Programming\\ForgeVoxCPM && git fetch origin main && git checkout --detach {ref} && powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\deploy-voxcpm.ps1 -Ref {ref}",
+      "how": "Build the pinned VoxCPM2 worker in its own checkout on laybackrig, download public weights without model loading, start only carbon-forge-voxcpm, and require health. Does not edit the old GPU checkout or restart Chatterbox, CHIM or the orchestrator. GPU generation is a separate smoke test and refuses a busy GPU."
     }
   },
-  "notes": "The GPU workers on laybackrig and maingamingrig are separate. This recipe updates only carbon-forge-adhoc. Verify the live MCP schema and changed behavior after deployment."
+  "notes": "The prod environment updates the orchestrator. prod-voxcpm deploys the isolated VoxCPM2 worker. Verify a real speech clip separately; worker health is not generation proof."
 }
