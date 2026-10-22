@@ -52,7 +52,7 @@ async def synthesize(client, cfg, text, *, reference=None, voice_description=Non
         body["audio_prompt_b64"] = base64.b64encode(reference).decode("ascii")
     try:
         r = await client.post(f"{cfg.voxcpm_url}/tts", json=body,
-                              headers={"Authorization": f"Bearer {cfg.voxcpm_token}"}, timeout=240)
+                              headers={"Authorization": f"Bearer {cfg.voxcpm_token}"}, timeout=100)
     except httpx.HTTPError as e:
         raise GenerationError("VoxCPM request failed; no automatic retry was made") from e
     if r.status_code >= 400:

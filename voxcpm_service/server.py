@@ -76,7 +76,7 @@ async def run_inference(directory):
         sys.executable, "-m", "voxcpm_service.infer", str(directory),
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     try:
-        await asyncio.wait_for(proc.wait(), timeout=210)
+        await asyncio.wait_for(proc.wait(), timeout=90)
         if proc.returncode:
             error = Path(directory, "error.txt")
             detail = error.read_text()[:300] if error.exists() else "Worker failed to generate audio"

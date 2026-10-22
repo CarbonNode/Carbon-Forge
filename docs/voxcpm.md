@@ -15,7 +15,7 @@ remains ElevenLabs. There is no automatic fallback to a paid provider.
 
 `voxcpm_service` is an independent FastAPI worker, not part of Chatterbox or ComfyUI.
 Every synthesis owns a short-lived process: one job at a time, no queued retries,
-210-second deadline, and all GPU memory released when that child exits. Cold
+90-second deadline, and all GPU memory released when that child exits. Cold
 generation refuses at GPU utilization >=50%, less than 9 GB free VRAM, or if the
 GPU cannot be checked. Worker health does not imply a generation has been tested.
 Reference conversion permits only local file/pipe protocols and deletes all inputs
