@@ -29,7 +29,7 @@
       "cwd": "C:\\Programming",
       "tier": "prod",
       "timeoutMin": 30,
-      "run": "if not exist C:\\Programming\\ForgeVoxCPM\\.git git clone https://github.com/CarbonNode/Carbon-Forge.git C:\\Programming\\ForgeVoxCPM\r\ncd /d C:\\Programming\\ForgeVoxCPM && git fetch origin main && git checkout --detach {ref} && powershell -NoProfile -ExecutionPolicy Bypass -File scripts\\deploy-voxcpm.ps1 -Ref {ref}",
+      "run": "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference='Stop'; if (!(Test-Path 'C:\\Programming\\ForgeVoxCPM\\.git')) { git clone https://github.com/CarbonNode/Carbon-Forge.git C:\\Programming\\ForgeVoxCPM; if ($LASTEXITCODE) { exit $LASTEXITCODE } }; Set-Location C:\\Programming\\ForgeVoxCPM; git fetch origin main; if ($LASTEXITCODE) { exit $LASTEXITCODE }; git checkout --detach {ref}; if ($LASTEXITCODE) { exit $LASTEXITCODE }; & .\\scripts\\deploy-voxcpm.ps1 -Ref {ref}\"",
       "how": "Build the pinned VoxCPM2 worker in its own checkout on laybackrig, download public weights without model loading, start only carbon-forge-voxcpm, and require health. Does not edit the old GPU checkout or restart Chatterbox, CHIM or the orchestrator. GPU generation is a separate smoke test and refuses a busy GPU."
     }
   },
