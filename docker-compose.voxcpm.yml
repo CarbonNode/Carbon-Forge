@@ -10,7 +10,9 @@ services:
     ports: ["5127:5127"]
     environment:
       FORGE_TOKEN: ${FORGE_TOKEN:?Forge worker needs the same token as the orchestrator}
-    volumes: ["voxcpm-models:/models"]
+    # VOXCPM_MODELS_DIR in the env file puts the weights on a plain host folder
+    # (laybackrig: D:/Forge/voxcpm-models); unset, they stay the named volume.
+    volumes: ["${VOXCPM_MODELS_DIR:-voxcpm-models}:/models"]
     gpus: all
     cpus: 2
     mem_limit: 12g

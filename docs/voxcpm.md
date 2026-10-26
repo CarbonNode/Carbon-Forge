@@ -28,8 +28,9 @@ Commit and push, then use Conduit `deploy` for **both** environments at the same
 - `carbon-forge / prod-voxcpm`: isolated checkout `C:\Programming\ForgeVoxCPM`
   on laybackrig, `docker-compose.voxcpm.yml`, port 5127. Reads the existing token
   from `C:\Programming\CarbonForge\.env`; leaves that old checkout untouched.
-  Downloads the pinned public model into the `voxcpm-models` volume without loading
-  it. Other Forge/CHIM containers are not restarted.
+  Downloads the pinned public model without loading it, into `D:\Forge\voxcpm-models`
+  (`VOXCPM_MODELS_DIR` in that `.env`, since 2026-10-26; unset, the `voxcpm-models`
+  volume). Other Forge/CHIM containers are not restarted.
 - `carbon-forge / prod`: orchestrator on super_server. `FORGE_VOXCPM_URL` defaults
   in its compose file to `http://192.168.0.177:5127`. `FORGE_VOXCPM_TOKEN` can override
   the default shared `FORGE_TOKEN` if the worker uses a different token.
