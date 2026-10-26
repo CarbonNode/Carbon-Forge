@@ -22,8 +22,11 @@ services:
     environment:
       FORGE_VOXCPM_URL: ${FORGE_VOXCPM_URL:-http://192.168.0.177:5127}
     volumes:
-      - forge-models:/models
-      - forge-results:/results
+      # FORGE_MODELS_DIR / FORGE_RESULTS_DIR in .env put these on a plain host folder
+      # (super-server: F:/Forge/...) so generated files can be browsed and deleted
+      # from Explorer. Unset, they stay the named volumes below.
+      - ${FORGE_MODELS_DIR:-forge-models}:/models
+      - ${FORGE_RESULTS_DIR:-forge-results}:/results
       - workspace:/workspace
     restart: unless-stopped
 volumes:

@@ -127,6 +127,12 @@ Dockerfile.mcp, docker-compose.forge.yml, .env.forge.example
 > super_server (which made `curl localhost:5125` there answer from the WRONG box) was deleted
 > 2026-09-16 — do not re-add it. `Exited (255)` on `carbon-forge-adhoc` after a host reboot just
 > needs `docker start`; the 2026-09-09 "failed to mount local volume" was transient.
+>
+> **Results and models live on F: (2026-10-26):** super_server's `.env` sets
+> `FORGE_RESULTS_DIR=F:/Forge/results` and `FORGE_MODELS_DIR=F:/Forge/models`, so `/results`
+> (the 30-day file cache, `jobs.json`, characters, prompts) and `/models` are plain folders on
+> DAS-SSD3 that can be browsed and deleted from Explorer. C: there has ~70 GB free, so do not move
+> them back into the `forge-results` / `forge-models` volumes. Unset, both stay named volumes.
 
 #### laybackrig (GPU-side checkout — chatterbox / retired forge container)
 
