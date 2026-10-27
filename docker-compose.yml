@@ -29,6 +29,14 @@ services:
       - ${FORGE_RESULTS_DIR:-forge-results}:/results
       - workspace:/workspace
     restart: unless-stopped
+    # super-server is shared with a dozen other projects. On 2026-10-27 this container
+    # sat at 17.2 GB resident while idle (an unbounded whisper-model cache, fixed in
+    # forge_mcp/tools/extract.py) and other projects' containers were OOM-killed during
+    # a deploy instead of it. A cap turns "the box falls over" into "forge restarts",
+    # which is the failure we can afford. Generation runs on the GPU boxes, so the
+    # ceiling only has to cover one whisper model plus ffmpeg work.
+    mem_limit: 8g
+    memswap_limit: 8g
 volumes:
   forge-models:
   forge-results:
