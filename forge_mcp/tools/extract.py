@@ -6,13 +6,41 @@ captions). Output saves to the project workspace + returns the text, so it can f
 Heavy imports are lazy (inside the tools) so a missing dep degrades to a clear error, not a crash.
 """
 import asyncio
+import gc
 import os
 import re
 import tempfile
 
 from forge_mcp import storage
 
-_WHISPER_CACHE: dict = {}  # model_name -> loaded WhisperModel (load once, reuse)
+_WHISPER_CACHE: dict = {}  # model_name -> loaded WhisperModel. Hold ONE; see _whisper_model.
+
+
+def _whisper_model(name: str, download_root: str):
+    """The loaded WhisperModel for `name`, reusing it; a different name REPLACES it.
+
+    This cache used to be unbounded — every model ever asked for stayed resident for the
+    life of the process. A CTranslate2 model plus its working buffers runs to several GB,
+    so a server that had transcribed with three sizes held all three. Measured on
+    carbon-forge-adhoc 2026-10-27: 17.2 GB resident, 17.9 GB of it private dirty anonymous
+    in three large regions, on a container doing nothing but answering health checks. On a
+    shared box that is enough to get other projects' containers OOM-killed during a deploy,
+    which is how it was found.
+
+    Transcription almost always uses one model, so keeping exactly one costs nothing and
+    bounds the process. The previous model is dropped and collected BEFORE the next is
+    loaded, so the two are never resident together.
+    """
+    cached = _WHISPER_CACHE.get(name)
+    if cached is not None:
+        return cached
+    if _WHISPER_CACHE:
+        _WHISPER_CACHE.clear()
+        gc.collect()
+    from faster_whisper import WhisperModel
+    model = WhisperModel(name, device="cpu", compute_type="int8", download_root=download_root)
+    _WHISPER_CACHE[name] = model
+    return model
 
 
 def _strip_vtt(vtt: str) -> str:
@@ -103,12 +131,9 @@ def register(mcp, ctx):
                     ydl.download([url])
                 audio = next((os.path.join(tmp, f) for f in os.listdir(tmp) if f.startswith("audio.")), None)
                 if audio:
-                    from faster_whisper import WhisperModel
-                    model = _WHISPER_CACHE.get(whisper_model)
-                    if model is None:
-                        model = WhisperModel(whisper_model, device="cpu", compute_type="int8",
-                                             download_root=os.path.join(cfg.results_root, "whisper-models"))
-                        _WHISPER_CACHE[whisper_model] = model
+                    model = _whisper_model(
+                        whisper_model,
+                        os.path.join(cfg.results_root, "whisper-models"))
                     segments, _ = model.transcribe(audio, language=language)
                     transcript = " ".join(s.text.strip() for s in segments).strip()
                     source = f"whisper:{whisper_model}"
